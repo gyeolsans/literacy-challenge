@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>문해력 챌린지</title>
+  <meta name="description" content="AI가 만든 문해력 문제로 독해력과 사고력을 테스트하는 웹앱" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#home" data-nav="home">
+      <span class="brand-mark">문</span>
+      <span>문해력 챌린지</span>
+    </a>
+    <nav class="nav" aria-label="주요 메뉴">
+      <button data-nav="home">홈</button>
+      <button data-nav="settings">테스트</button>
+      <button data-nav="ranking">랭킹</button>
+      <button data-nav="profile">내 정보</button>
+      <button data-nav="wrong-note">오답노트</button>
+      <button data-nav="stats">통계</button>
+      <button data-nav="today">오늘의 문제</button>
+      <button data-nav="rooms">대결 방</button>
+      <button data-nav="ranked">랭킹전</button>
+      <button data-nav="replays">리플레이</button>
+      <button data-nav="public-replays">공개 리플레이</button>
+      <button data-nav="admin">관리자</button>
+    </nav>
+  </header>
+
+  <main id="app" class="app" aria-live="polite"></main>
+
+  <dialog id="nicknameDialog" class="dialog">
+    <form method="dialog" id="nicknameForm" class="dialog-card">
+      <h2>닉네임 설정</h2>
+      <p>랭킹과 기록에 사용할 닉네임을 입력하세요.</p>
+      <input id="nicknameInput" maxlength="10" placeholder="2~10자" autocomplete="nickname" />
+      <p id="nicknameError" class="form-error"></p>
+      <div class="dialog-actions">
+        <button class="btn primary" value="confirm">저장</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="./config.js"></script>
+  <script src="./services/supabaseService.js"></script>
+  <script src="./services/userRemoteService.js"></script>
+  <script src="./services/analysisService.js"></script>
+  <script src="./services/replayService.js"></script>
+  <script src="./utils/ratingUtils.js"></script>
+  <script src="./utils/roomCodeUtils.js"></script>
+  <script src="./services/roomService.js"></script>
+  <script src="./services/rankedMatchService.js"></script>
+  <script src="./script.js"></script>
+</body>
+</html>
