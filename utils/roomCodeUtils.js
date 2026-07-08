@@ -8,5 +8,12 @@
     return code;
   }
 
-  window.RoomCodeUtils = { generateRoomCode };
+  function normalizeRoomCode(value) {
+    return String(value || "")
+      .toUpperCase()
+      .replace(/[^ABCDEFGHJKLMNPQRSTUVWXYZ23456789]/g, "")
+      .slice(0, 6);
+  }
+
+  window.RoomCodeUtils = { generateRoomCode, normalizeRoomCode };
 })();

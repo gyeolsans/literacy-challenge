@@ -13,6 +13,20 @@
     const supabase = ensureOnline();
     if (!user?.id) throw new Error("온라인 유저를 생성하지 못했습니다.");
 
+    const { data: existingRoom, error: existingError } = await supabase
+      .from("rooms")
+      .select("*")
+      .eq("host_user_id", user.id)
+      .eq("status", "waiting")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (existingError) throw Object.assign(existingError, { stage: "rooms existing host select" });
+    if (existingRoom) {
+      const player = await joinRoom(existingRoom, user, true);
+      return { room: existingRoom, player, reused: true };
+    }
+
     const roomPayload = {
       room_code: window.RoomCodeUtils.generateRoomCode(),
       host_user_id: user.id,
@@ -92,6 +106,12 @@
 
   async function joinRoom(room, user, isHost = false) {
     const supabase = ensureOnline();
+    if (typeof room === "string") {
+      const foundRoom = await findRoomByCode(room);
+      if (!foundRoom) throw new Error("waiting 상태의 방을 찾을 수 없습니다.");
+      const remoteUser = user || await window.UserRemoteService.getOrCreateUser("익명");
+      return joinRoom(foundRoom, remoteUser, false);
+    }
     if (!room?.id) throw new Error("입장할 room id가 없습니다.");
     if (!user?.id) throw new Error("온라인 user id가 없습니다.");
 
@@ -122,12 +142,19 @@
     return data;
   }
 
+  async function joinRoomById(roomId, user) {
+    const room = await getRoom(roomId);
+    if (!room) throw new Error("방을 찾을 수 없습니다.");
+    const remoteUser = user || await window.UserRemoteService.getOrCreateUser("익명");
+    return joinRoom(room, remoteUser, false);
+  }
+
   async function findRoomByCode(roomCode) {
     const supabase = ensureOnline();
     const { data, error } = await supabase
       .from("rooms")
       .select("*")
-      .eq("room_code", String(roomCode || "").toUpperCase())
+      .eq("room_code", window.RoomCodeUtils?.normalizeRoomCode?.(roomCode) || String(roomCode || "").toUpperCase())
       .eq("status", "waiting")
       .maybeSingle();
     if (error) throw Object.assign(error, { stage: "rooms select by room_code" });
@@ -148,6 +175,19 @@
       .single();
     if (error) throw Object.assign(error, { stage: "room_players ready update" });
     return data;
+  }
+
+  async function toggleReady(roomId, userId) {
+    const players = await getRoomPlayers(roomId);
+    const current = players.find((player) => player.user_id === userId);
+    return setReady(roomId, userId, !current?.is_ready);
+  }
+
+  function canHostStartGame(players, hostUserId) {
+    const activePlayers = (players || []).filter((player) => player.status !== "left");
+    const host = activePlayers.find((player) => player.user_id === hostUserId);
+    const guests = activePlayers.filter((player) => player.user_id !== hostUserId);
+    return Boolean(host && guests.length && guests.every((player) => player.is_ready));
   }
 
   async function leaveRoom(roomId, userId) {
@@ -195,6 +235,14 @@
     return data;
   }
 
+  async function finishRoomPlayer(roomId, userId, resultData) {
+    return updateRoomPlayerProgress(roomId, userId, {
+      ...resultData,
+      status: "finished",
+      finished_at: new Date().toISOString()
+    });
+  }
+
   async function finishRoomIfComplete(roomId, players) {
     const activePlayers = (players || await getRoomPlayers(roomId)).filter((player) => player.status !== "left");
     if (!activePlayers.length || !activePlayers.every((player) => player.status === "finished")) return null;
@@ -218,10 +266,13 @@
     return resultSummary;
   }
 
-  function subscribeRoom(roomId, callback) {
+  function subscribeRoom(roomId, callbacks) {
     const supabase = ensureOnline();
     unsubscribeRoom();
     subscribedRoomId = roomId;
+    const callback = typeof callbacks === "function"
+      ? callbacks
+      : (payload) => callbacks?.onChange?.(payload);
     roomChannel = supabase
       .channel(`room-${roomId}`)
       .on("postgres_changes", { event: "*", schema: "public", table: "rooms", filter: `id=eq.${roomId}` }, callback)
@@ -242,10 +293,17 @@
     getRoomPlayers,
     getOpenRooms,
     joinRoom,
+    joinRoomById,
     findRoomByCode,
+    toggleReady,
     setReady,
+    canHostStartGame,
     leaveRoom,
+    startRoomGame: startRoom,
     startRoom,
+    submitRoomAnswer: updateRoomPlayerProgress,
+    finishRoomPlayer,
+    finalizeRoomIfAllFinished: finishRoomIfComplete,
     subscribeRoom,
     unsubscribeRoom,
     updateRoomPlayerProgress,

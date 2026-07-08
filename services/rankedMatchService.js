@@ -200,6 +200,7 @@
       .update({
         ranked_games: Number(profile.ranked_games || 0),
         tier: profile.tier,
+        tier_icon: profile.tier_icon || window.RatingUtils.getTierIcon(profile.tier),
         percentile: profile.percentile,
         rank_position: profile.rank_position,
         total_ranked_players: profile.total_ranked_players,
@@ -240,11 +241,19 @@
   }
 
   window.RankedMatchService = {
+    startRankedQueue: findOrCreateMatch,
+    findOrCreateRankedMatch: findOrCreateMatch,
     findOrCreateMatch,
     getActiveMatchForUser,
+    joinRankedMatch: getMatch,
     getMatch,
+    submitRankedAnswer: submitResult,
+    finishRankedPlayer: submitResult,
     submitResult,
+    finalizeRankedMatchIfBothFinished: finalizeIfReady,
     finalizeIfReady,
+    updateRankingProfileAfterMatch: updateRankingProfile,
+    getRankedLeaderboard: getRankingProfiles,
     getRankingProfiles,
     recalculateAllTiers,
     cancelMatch,

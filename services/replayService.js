@@ -132,6 +132,16 @@
     return replay;
   }
 
+  async function deleteReplay(replayId) {
+    if (window.SupabaseService?.isConfigured()) {
+      await window.SupabaseService.request(`replay_items?replay_id=eq.${replayId}`, { method: "DELETE" });
+      return window.SupabaseService.request(`replays?id=eq.${replayId}`, { method: "DELETE" });
+    }
+    const replays = getLocalReplays().filter((replay) => replay.id !== replayId);
+    setLocalReplays(replays);
+    return true;
+  }
+
   async function incrementReplayViewCount(replayId) {
     if (!window.SupabaseService?.isConfigured()) return;
     const replay = await getReplayById(replayId);
@@ -149,6 +159,7 @@
     getMyReplays,
     getPublicReplays,
     getReplayById,
+    deleteReplay,
     incrementReplayViewCount,
     getLocalReplays
   };

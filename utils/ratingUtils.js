@@ -1,22 +1,22 @@
 (function () {
   const TIER_ICONS = {
-    "랭킹없음": "[ ]",
-    Bronze: "[B]",
-    Silver: "[S]",
-    Gold: "[G]",
-    Platinum: "[P]",
-    Diamond: "[D]",
-    Master: "[M]",
-    Grandmaster: "[GM]",
-    Challenger: "[C]",
-    "브론즈": "[B]",
-    "실버": "[S]",
-    "골드": "[G]",
-    "플래티넘": "[P]",
-    "다이아몬드": "[D]",
-    "마스터": "[M]",
-    "그랜드마스터": "[GM]",
-    "챌린저": "[C]"
+    "랭킹없음": "◽",
+    Bronze: "🟫",
+    Silver: "⚪",
+    Gold: "🟨",
+    Platinum: "🟦",
+    Diamond: "💎",
+    Master: "🔮",
+    Grandmaster: "👑",
+    Challenger: "🔥",
+    "브론즈": "🟫",
+    "실버": "⚪",
+    "골드": "🟨",
+    "플래티넘": "🟦",
+    "다이아몬드": "💎",
+    "마스터": "🔮",
+    "그랜드마스터": "👑",
+    "챌린저": "🔥"
   };
 
   function calculateExpectedScore(playerRating, opponentRating) {
@@ -73,11 +73,13 @@
         percentile,
         total_ranked_players: total
       };
-      return { ...decorated, tier: getTierByPercentile(decorated) };
+      const tier = getTierByPercentile(decorated);
+      return { ...decorated, tier, tier_icon: getTierIcon(tier) };
     });
     const decoratedUnranked = unranked.map((profile) => ({
       ...profile,
       tier: "랭킹없음",
+      tier_icon: getTierIcon("랭킹없음"),
       percentile: null,
       rank_position: null,
       total_ranked_players: total
@@ -86,7 +88,7 @@
   }
 
   function getTierIcon(tier) {
-    return TIER_ICONS[tier] || "[ ]";
+    return TIER_ICONS[tier] || "◽";
   }
 
   function tierName(profileOrTier) {
@@ -97,7 +99,7 @@
   function tierLabel(profile) {
     const tier = tierName(profile);
     const percentile = profile?.percentile == null ? "" : ` · 상위 ${Number(profile.percentile).toFixed(1)}%`;
-    return `${getTierIcon(tier)} ${tier}${percentile}`;
+    return `${profile?.tier_icon || getTierIcon(tier)} ${tier}${percentile}`;
   }
 
   // Legacy helpers are kept so older UI paths do not break.

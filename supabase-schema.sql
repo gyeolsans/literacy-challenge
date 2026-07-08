@@ -57,6 +57,7 @@ create table if not exists public.ranking_profiles (
   nickname text not null,
   rating integer default 1000,
   tier text default '랭킹없음',
+  tier_icon text default '◽',
   division integer default 5,
   ranked_games integer default 0,
   percentile numeric null,
@@ -156,6 +157,9 @@ add column if not exists rank_position integer null;
 alter table public.ranking_profiles
 add column if not exists total_ranked_players integer default 0;
 
+alter table public.ranking_profiles
+add column if not exists tier_icon text default '◽';
+
 create table if not exists public.questions_cache (
   id uuid primary key default gen_random_uuid(),
   difficulty text,
@@ -178,13 +182,16 @@ alter table public.replay_items enable row level security;
 alter table public.public_replay_likes enable row level security;
 alter table public.questions_cache enable row level security;
 
+-- 개발용 완화 정책이며 실제 서비스 전에는 더 엄격하게 바꿔야 함.
 create policy "users readable for anon development" on public.users for select using (true);
 create policy "users insert own anonymous id" on public.users for insert with check (true);
 create policy "users update own row development" on public.users for update using (true);
+create policy "users delete development" on public.users for delete using (true);
 
 create policy "ranking profiles public read" on public.ranking_profiles for select using (true);
 create policy "ranking profile insert development" on public.ranking_profiles for insert with check (true);
 create policy "ranking profile update owner development" on public.ranking_profiles for update using (true);
+create policy "ranking profile delete development" on public.ranking_profiles for delete using (true);
 
 create policy "public replays readable" on public.replays for select using (is_public = true);
 create policy "own replays readable development" on public.replays for select using (true);
@@ -195,10 +202,12 @@ create policy "public replay items readable through replay" on public.replay_ite
 for select using (exists (select 1 from public.replays r where r.id = replay_id and r.is_public = true));
 create policy "own replay items readable development" on public.replay_items for select using (true);
 create policy "replay items insert development" on public.replay_items for insert with check (true);
+create policy "replay items update development" on public.replay_items for update using (true) with check (true);
 
 create policy "room participant read rooms development" on public.rooms for select using (true);
 create policy "room create development" on public.rooms for insert with check (true);
 create policy "room update participants development" on public.rooms for update using (true);
+create policy "room delete development" on public.rooms for delete using (true);
 
 create policy "room players read development" on public.room_players for select using (true);
 create policy "room players insert development" on public.room_players for insert with check (true);
@@ -207,13 +216,17 @@ create policy "room players delete development" on public.room_players for delet
 
 create policy "room matches read participants development" on public.room_matches for select using (true);
 create policy "room matches insert development" on public.room_matches for insert with check (true);
+create policy "room matches update development" on public.room_matches for update using (true) with check (true);
+create policy "room matches delete development" on public.room_matches for delete using (true);
 
 create policy "ranked matches read participants development" on public.ranked_matches for select using (true);
 create policy "ranked matches insert development" on public.ranked_matches for insert with check (true);
 create policy "ranked matches update participants development" on public.ranked_matches for update using (true);
+create policy "ranked matches delete development" on public.ranked_matches for delete using (true);
 
 create policy "likes read public" on public.public_replay_likes for select using (true);
 create policy "likes insert user" on public.public_replay_likes for insert with check (true);
+create policy "likes update development" on public.public_replay_likes for update using (true) with check (true);
 create policy "likes delete user" on public.public_replay_likes for delete using (true);
 
 create policy "question cache read development" on public.questions_cache for select using (true);

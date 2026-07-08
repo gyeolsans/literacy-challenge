@@ -1,3 +1,6 @@
+console.log("DEPLOY_VERSION", "supabase-restored-2026-07-08");
+console.log("APP_CONFIG_AT_START", window.APP_CONFIG);
+
 const app = document.querySelector("#app");
 const navButtons = [...document.querySelectorAll("[data-nav]")];
 const nicknameDialog = document.querySelector("#nicknameDialog");
@@ -2155,7 +2158,7 @@ function renderRooms() {
     }
   });
   document.querySelector("[data-join-room]")?.addEventListener("click", async () => {
-    const code = document.querySelector("#roomCodeInput")?.value?.trim().toUpperCase();
+    const code = window.RoomCodeUtils?.normalizeRoomCode?.(document.querySelector("#roomCodeInput")?.value) || "";
     joinRoomByCode(code, document.querySelector("[data-join-room]"));
   });
   document.querySelector("[data-refresh-rooms]")?.addEventListener("click", renderOpenRoomList);

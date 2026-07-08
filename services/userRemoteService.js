@@ -50,6 +50,11 @@
         .select()
         .single();
       if (error) throw error;
+      const { error: profileError } = await supabase
+        .from("ranking_profiles")
+        .update({ nickname, updated_at: new Date().toISOString() })
+        .eq("user_id", id);
+      if (profileError) throw profileError;
       return data;
     } catch (error) {
       console.error("updateNicknameRemote failed:", error);
@@ -81,6 +86,7 @@
         nickname: user.nickname || "익명",
         rating: 1000,
         tier: "랭킹없음",
+        tier_icon: "◽",
         division: 5,
         ranked_games: 0,
         percentile: null,
@@ -106,6 +112,7 @@
     getAnonymousUserId,
     getOrCreateUser,
     getOrCreateRemoteUser: getOrCreateUser,
+    updateRemoteNickname: updateNicknameRemote,
     updateNicknameRemote,
     getRankingProfile,
     createRankingProfileIfNeeded

@@ -23,7 +23,10 @@
   function hasSupabaseConfig() {
     const config = getConfig();
     const details = [];
-    if (!config) details.push("config.js가 로드되지 않았습니다.");
+    if (!config) {
+      details.push("config.js가 로드되지 않았습니다.");
+      details.push("Vercel에서 /config.js가 404이면 index.html 안에 window.APP_CONFIG를 직접 정의하는 방법 B를 사용하세요.");
+    }
     if (!config?.SUPABASE_URL) details.push("SUPABASE_URL이 비어 있습니다.");
     if (!config?.SUPABASE_ANON_KEY) details.push("SUPABASE_ANON_KEY가 비어 있습니다.");
     if (config?.SUPABASE_URL && !String(config.SUPABASE_URL).startsWith("https://")) {
@@ -49,10 +52,13 @@
       return "네트워크 요청에 실패했습니다. config.js의 Supabase URL/anon key, 인터넷 연결, Supabase 프로젝트 상태, CORS를 확인하세요.";
     }
     if (code === "42P01" || message.includes("does not exist")) {
-      return "Supabase 테이블을 찾을 수 없습니다. supabase-schema.sql을 SQL Editor에서 실행해 주세요.";
+      return "테이블이 없습니다. supabase-schema.sql을 실행하세요.";
     }
     if (code === "42501" || message.toLowerCase().includes("row-level security") || message.includes("permission denied")) {
       return "RLS 정책 때문에 요청이 거부되었습니다. 개발용 RLS 정책을 확인하세요.";
+    }
+    if (message.toLowerCase().includes("schema cache")) {
+      return "Supabase 스키마 migration을 실행한 뒤 10~30초 후 새로고침하세요.";
     }
     if (message.includes("Invalid API key") || message.includes("invalid api key")) {
       return "Supabase anon key가 잘못되었습니다.";
@@ -81,6 +87,10 @@
     return cachedClient;
   }
 
+  function ensureSupabaseClient() {
+    return getSupabaseClient();
+  }
+
   function isConfigured() {
     return hasSupabaseConfig().ok;
   }
@@ -91,7 +101,7 @@
     return lastStatus;
   }
 
-  async function testSupabaseConnection() {
+  async function checkSupabaseDiagnostics() {
     const configCheck = hasSupabaseConfig();
     if (window.location.protocol === "file:") {
       return setStatus("disabled", "파일 직접 실행 모드", ["현재 파일 직접 실행 모드입니다. 온라인 기능을 사용하려면 npm run dev 또는 Vercel 배포 주소로 접속하세요."]);
@@ -102,7 +112,15 @@
 
     try {
       const client = getSupabaseClient();
-      const tables = ["users", "rooms", "ranking_profiles"];
+      const tables = [
+        "users",
+        "rooms",
+        "room_players",
+        "ranking_profiles",
+        "ranked_matches",
+        "replays",
+        "replay_items"
+      ];
       const details = [];
       for (const table of tables) {
         const { error } = await client.from(table).select("*").limit(1);
@@ -123,6 +141,10 @@
           : "failed";
       return setStatus(state, "Supabase 연결 테스트 실패", [friendly]);
     }
+  }
+
+  async function testSupabaseConnection() {
+    return checkSupabaseDiagnostics();
   }
 
   function renderSupabaseStatus() {
@@ -204,9 +226,12 @@
   window.SupabaseService = {
     hasSupabaseConfig,
     getSupabaseClient,
+    ensureSupabaseClient,
+    checkSupabaseDiagnostics,
     testSupabaseConnection,
     renderSupabaseStatus,
     getFriendlyErrorMessage,
+    getFriendlySupabaseErrorMessage: getFriendlyErrorMessage,
     getStatus: () => lastStatus,
     isConfigured,
     request,
