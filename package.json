@@ -6,7 +6,7 @@
     "dev": "node dev-server.js",
     "build": "node -e \"console.log('Static app: no build step required')\"",
     "start": "node dev-server.js",
-    "lint": "node --check script.js && node --check api/generate-questions.js && node --check api/analyze-result.js && node --check dev-server.js && node --check config.js && node --check config.example.js && node --check services/supabaseService.js && node --check services/userRemoteService.js && node --check services/analysisService.js && node --check services/replayService.js && node --check services/roomService.js && node --check services/rankedMatchService.js && node --check utils/ratingUtils.js && node --check utils/roomCodeUtils.js"
+    "lint": "node --check script.js && node --check api/analyze-result.js && node --check dev-server.js && node --check config.js && node --check config.example.js && node --check services/supabaseService.js && node --check services/userRemoteService.js && node --check services/analysisService.js && node --check services/replayService.js && node --check services/roomService.js && node --check services/rankedMatchService.js && node --check utils/ratingUtils.js && node --check utils/roomCodeUtils.js"
   },
   "dependencies": {
     "next": "14.2.5",

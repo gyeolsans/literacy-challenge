@@ -65,9 +65,12 @@
         .from("ranked_matches")
         .update({
           player_b_id: user.id,
+          player2_user_id: user.id,
+          player2_nickname: user.nickname || "anonymous",
           status: "playing",
           question_set: nextQuestionSet,
-          started_at: new Date().toISOString()
+          started_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
         })
         .eq("id", match.id)
         .eq("status", "matching")
@@ -79,12 +82,16 @@
 
     const payload = {
       player_a_id: user.id,
+      player1_user_id: user.id,
+      player1_nickname: user.nickname || "anonymous",
       status: "matching",
       difficulty: settings.difficulty || "normal",
       question_count: Number(settings.count || 5),
       question_set: settings.questionSet || [],
       player_a_result: { rating: myRating, nickname: user.nickname || "익명" },
-      created_at: new Date().toISOString()
+      player1_result: { rating: myRating, nickname: user.nickname || "anonymous" },
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
     };
     const { data, error } = await supabase
       .from("ranked_matches")
@@ -106,9 +113,14 @@
       rating: Number(result.rating || 1000),
       submitted_at: new Date().toISOString()
     };
+    const aliasColumn = isPlayerA ? "player1_result" : "player2_result";
     const { data, error } = await supabase
       .from("ranked_matches")
-      .update({ [column]: payload })
+      .update({
+        [column]: payload,
+        [aliasColumn]: payload,
+        updated_at: new Date().toISOString()
+      })
       .eq("id", match.id)
       .select()
       .single();
@@ -139,7 +151,10 @@
         winner_user_id: winnerUserId,
         rating_delta_a: deltaA,
         rating_delta_b: deltaB,
-        finished_at: new Date().toISOString()
+        rating_delta_player1: deltaA,
+        rating_delta_player2: deltaB,
+        finished_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
       })
       .eq("id", matchId)
       .select()
@@ -218,7 +233,11 @@
     const supabase = ensureOnline();
     const { data, error } = await supabase
       .from("ranked_matches")
-      .update({ status: "cancelled" })
+      .update({
+        status: "cancelled",
+        cancelled_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      })
       .eq("id", matchId)
       .eq("player_a_id", userId)
       .eq("status", "matching")

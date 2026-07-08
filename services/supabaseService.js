@@ -116,10 +116,12 @@
         "users",
         "rooms",
         "room_players",
+        "room_matches",
         "ranking_profiles",
         "ranked_matches",
         "replays",
-        "replay_items"
+        "replay_items",
+        "questions_cache"
       ];
       const details = [];
       for (const table of tables) {
@@ -163,6 +165,10 @@
         ${lastStatus.details?.length ? `<p>${lastStatus.details.map((item) => String(item)).join(" ")}</p>` : ""}
       </div>
     `;
+  }
+
+  function renderSupabaseDiagnostics() {
+    return renderSupabaseStatus();
   }
 
   function applyQuery(builder, queryString = "") {
@@ -230,6 +236,7 @@
     checkSupabaseDiagnostics,
     testSupabaseConnection,
     renderSupabaseStatus,
+    renderSupabaseDiagnostics,
     getFriendlyErrorMessage,
     getFriendlySupabaseErrorMessage: getFriendlyErrorMessage,
     getStatus: () => lastStatus,

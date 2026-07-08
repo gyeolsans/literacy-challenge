@@ -1,7 +1,6 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
-const generateQuestionsHandler = require("./api/generate-questions.js");
 const analyzeResultHandler = require("./api/analyze-result.js");
 
 const root = __dirname;
@@ -95,11 +94,6 @@ function serveStatic(req, res) {
 }
 
 const server = http.createServer(async (req, res) => {
-  if (req.url.startsWith("/api/generate-questions")) {
-    req.body = await readBody(req).catch(() => ({}));
-    return generateQuestionsHandler(req, createVercelLikeResponse(res));
-  }
-
   if (req.url.startsWith("/api/analyze-result")) {
     req.body = await readBody(req).catch(() => ({}));
     return analyzeResultHandler(req, createVercelLikeResponse(res));

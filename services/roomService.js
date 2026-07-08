@@ -35,6 +35,9 @@
     const roomPayload = {
       room_code: window.RoomCodeUtils.generateRoomCode(),
       host_user_id: user.id,
+      host_nickname: user.nickname || "anonymous",
+      title: `${user.nickname || "anonymous"} room`,
+      max_players: MAX_ROOM_PLAYERS,
       status: "waiting",
       difficulty: settings.difficulty,
       question_count: Number(settings.count || 5),
@@ -43,7 +46,8 @@
       time_per_question: Number(settings.secondsPerQuestion || 60),
       selected_types: settings.selectedTypes || [],
       question_set: questionSet || [],
-      created_at: new Date().toISOString()
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
     };
 
     const { data: room, error: roomError } = await supabase
@@ -110,7 +114,7 @@
         const host = activePlayers.find((player) => player.user_id === room.host_user_id && player.is_host);
         return { ...room, players: activePlayers, host };
       })
-      .filter((room) => room.host && room.players.length < MAX_ROOM_PLAYERS);
+      .filter((room) => room.host && room.players.length < Number(room.max_players || MAX_ROOM_PLAYERS));
   }
 
   async function joinRoom(room, user, isHost = false) {
@@ -128,7 +132,7 @@
     }
 
     const activePlayers = await getRoomPlayers(room.id);
-    if (!activePlayers.some((player) => player.user_id === user.id) && activePlayers.length >= MAX_ROOM_PLAYERS) {
+    if (!activePlayers.some((player) => player.user_id === user.id) && activePlayers.length >= Number(room.max_players || MAX_ROOM_PLAYERS)) {
       throw new Error("방 정원이 가득 찼습니다.");
     }
 
@@ -155,7 +159,8 @@
       wrong_count: 0,
       total_time: 0,
       finished_at: null,
-      joined_at: existing?.joined_at || new Date().toISOString()
+      joined_at: existing?.joined_at || new Date().toISOString(),
+      updated_at: new Date().toISOString()
     };
     const { data, error } = await supabase
       .from("room_players")
@@ -231,14 +236,14 @@
       const finishedAt = new Date().toISOString();
       const { error: playerError } = await supabase
         .from("room_players")
-        .update({ status: "left", is_ready: false })
+        .update({ status: "left", is_ready: false, updated_at: finishedAt })
         .eq("room_id", roomId)
         .eq("user_id", userId);
       if (playerError) throw Object.assign(playerError, { stage: "room_players host leave update" });
 
       const { data, error } = await supabase
         .from("rooms")
-        .update({ status: "cancelled", finished_at: finishedAt })
+        .update({ status: "cancelled", finished_at: finishedAt, cancelled_at: finishedAt, updated_at: finishedAt })
         .eq("id", roomId)
         .select()
         .single();
@@ -259,7 +264,7 @@
 
     const { data, error } = await supabase
       .from("room_players")
-      .update({ status: "left", is_ready: false })
+      .update({ status: "left", is_ready: false, updated_at: new Date().toISOString() })
       .eq("room_id", roomId)
       .eq("user_id", userId)
       .select();
@@ -283,7 +288,7 @@
     const startedAt = new Date().toISOString();
     const { data: room, error: roomError } = await supabase
       .from("rooms")
-      .update({ status: "playing", started_at: startedAt })
+      .update({ status: "playing", started_at: startedAt, updated_at: startedAt })
       .eq("id", roomId)
       .eq("status", "waiting")
       .select()
@@ -292,7 +297,7 @@
 
     const { error: playersError } = await supabase
       .from("room_players")
-      .update({ status: "playing" })
+      .update({ status: "playing", updated_at: startedAt })
       .eq("room_id", roomId)
       .neq("status", "left");
     if (playersError) throw Object.assign(playersError, { stage: "room_players start update" });
@@ -303,7 +308,7 @@
     const supabase = ensureOnline();
     const { data, error } = await supabase
       .from("room_players")
-      .update(progressData)
+      .update({ ...progressData, updated_at: new Date().toISOString() })
       .eq("room_id", roomId)
       .eq("user_id", userId)
       .select();
@@ -333,7 +338,7 @@
     const supabase = ensureOnline();
     const { error: roomError } = await supabase
       .from("rooms")
-      .update({ status: "finished", finished_at: new Date().toISOString() })
+      .update({ status: "finished", finished_at: new Date().toISOString(), updated_at: new Date().toISOString() })
       .eq("id", roomId)
       .neq("status", "finished");
     if (roomError) throw Object.assign(roomError, { stage: "rooms finish update" });
@@ -406,7 +411,7 @@
     const before = new Date(Date.now() - STALE_ROOM_MINUTES * 60 * 1000).toISOString();
     const { data, error } = await supabase
       .from("rooms")
-      .update({ status: "cancelled", finished_at: new Date().toISOString() })
+      .update({ status: "cancelled", finished_at: new Date().toISOString(), cancelled_at: new Date().toISOString(), updated_at: new Date().toISOString() })
       .eq("status", "waiting")
       .lt("created_at", before)
       .select();

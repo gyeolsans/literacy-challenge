@@ -1,4 +1,4 @@
-console.log("DEPLOY_VERSION", "supabase-edge-ai-questions-2026-07-08");
+console.log("DEPLOY_VERSION", "full-supabase-repair-v1");
 console.log("APP_CONFIG_AT_START", window.APP_CONFIG);
 
 const app = document.querySelector("#app");
@@ -3250,6 +3250,136 @@ function replayItemHtml(item) {
   `;
 }
 
+function diagnosticsPanelHtml() {
+  return `
+    <div class="card">
+      <div class="row between">
+        <h3>Supabase diagnostics</h3>
+        <span class="badge info">full-supabase-repair-v1</span>
+      </div>
+      <div class="actions" style="margin-top:12px">
+        <button class="btn" data-diagnostics-action="supabase">Supabase connection</button>
+        <button class="btn" data-diagnostics-action="realtime">Realtime channel</button>
+        <button class="btn" data-diagnostics-action="ai">AI Edge Function</button>
+        <button class="btn" data-diagnostics-action="rooms">Refresh rooms</button>
+        <button class="btn" data-diagnostics-action="cleanup">Cleanup stale rooms</button>
+        <button class="btn" data-diagnostics-action="storage">localStorage state</button>
+        <button class="btn" data-diagnostics-action="profile">User/ranked profile</button>
+      </div>
+      <pre id="diagnosticsOutput" class="debug-panel">Select a diagnostics action.</pre>
+    </div>
+  `;
+}
+
+function setDiagnosticsOutput(payload) {
+  const output = document.querySelector("#diagnosticsOutput");
+  if (!output) return;
+  output.textContent = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
+}
+
+function getLocalStorageDiagnostics() {
+  const snapshot = {};
+  Object.entries(STORAGE_KEYS).forEach(([name, key]) => {
+    snapshot[name] = safeParse(localStorage.getItem(key), localStorage.getItem(key));
+  });
+  return {
+    version: "full-supabase-repair-v1",
+    hash: location.hash,
+    nickname: getNickname(),
+    supabaseConfigured: window.SupabaseService?.hasSupabaseConfig?.() || null,
+    currentRoom: {
+      roomId: localStorage.getItem(STORAGE_KEYS.currentRoomId),
+      userId: localStorage.getItem(STORAGE_KEYS.currentRoomUserId),
+      mode: localStorage.getItem(STORAGE_KEYS.currentRoomMode)
+    },
+    storage: snapshot
+  };
+}
+
+async function runDiagnosticsAction(action) {
+  if (action === "supabase") {
+    const status = await window.SupabaseService.checkSupabaseDiagnostics();
+    return { action, status, config: window.APP_CONFIG };
+  }
+  if (action === "realtime") {
+    const supabase = window.SupabaseService.getSupabaseClient();
+    return await new Promise((resolve) => {
+      const channelName = `diagnostics-realtime-${Date.now()}`;
+      const channel = supabase.channel(channelName);
+      const timeoutId = setTimeout(() => {
+        supabase.removeChannel(channel);
+        resolve({ action, channel: channelName, status: "timeout" });
+      }, 5000);
+      channel.subscribe((status, error) => {
+        if (status === "SUBSCRIBED" || status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
+          clearTimeout(timeoutId);
+          supabase.removeChannel(channel);
+          resolve({ action, channel: channelName, status, error: error?.message || null });
+        }
+      });
+    });
+  }
+  if (action === "ai") {
+    const supabase = window.SupabaseService.getSupabaseClient();
+    const { data, error } = await supabase.functions.invoke("generate-questions", {
+      body: {
+        difficulty: "easy",
+        count: 1,
+        includeShortAnswer: false,
+        selectedTypes: ["main_idea"]
+      }
+    });
+    if (error) throw error;
+    return { action, returnedCount: data?.returnedCount || data?.questions?.length || 0, data };
+  }
+  if (action === "rooms") {
+    const rooms = await window.RoomService.getOpenRooms();
+    return { action, count: rooms.length, rooms };
+  }
+  if (action === "cleanup") {
+    const cleaned = await window.RoomService.cleanupStaleRooms();
+    return { action, cleanedCount: cleaned.length, cleaned };
+  }
+  if (action === "storage") {
+    return getLocalStorageDiagnostics();
+  }
+  if (action === "profile") {
+    const user = await window.UserRemoteService.getOrCreateUser(getNickname() || "anonymous");
+    const profile = await window.UserRemoteService.createRankingProfileIfNeeded(user);
+    return { action, user, profile };
+  }
+  throw new Error(`Unknown diagnostics action: ${action}`);
+}
+
+function bindAdminDiagnostics() {
+  document.querySelectorAll("[data-diagnostics-action]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const action = button.dataset.diagnosticsAction;
+      const originalLabel = button.textContent;
+      try {
+        button.disabled = true;
+        button.textContent = "Running...";
+        setDiagnosticsOutput(`Running ${action} diagnostics...`);
+        const result = await runDiagnosticsAction(action);
+        console.log("[Diagnostics]", action, result);
+        setDiagnosticsOutput(result);
+        showNotice(`${action} diagnostics completed.`, "success");
+      } catch (error) {
+        console.error(`[Diagnostics] ${action} failed:`, error);
+        setDiagnosticsOutput({
+          action,
+          ok: false,
+          message: window.SupabaseService?.getFriendlySupabaseErrorMessage?.(error) || error?.message || String(error)
+        });
+        showNotice(`${action} diagnostics failed.`, "error", 0);
+      } finally {
+        button.disabled = false;
+        button.textContent = originalLabel;
+      }
+    });
+  });
+}
+
 function renderAdmin() {
   const authed = getStorage(STORAGE_KEYS.adminAuthed, false);
   if (!authed) {
@@ -3281,6 +3411,7 @@ function renderAdmin() {
         <button class="btn" data-backup>전체 localStorage 백업 JSON 다운로드</button>
         <label class="btn">JSON 가져오기<input id="importJson" type="file" accept="application/json" hidden /></label>
       </div>
+      ${diagnosticsPanelHtml()}
       <div class="card">
         <h3>저장된 AI 문제 목록 (${aiQuestions.length})</h3>
         <div class="table-list">${aiQuestions.map((q) => `<div class="history-item">${escapeHtml(q.id)} · ${escapeHtml(TYPE_LABELS[q.type] || q.type)} · ${escapeHtml(q.question)}</div>`).join("") || `<div class="empty">저장된 AI 문제가 없습니다.</div>`}</div>
@@ -3297,6 +3428,7 @@ function renderAdmin() {
   });
   document.querySelector("[data-backup]").addEventListener("click", backupLocalStorage);
   document.querySelector("#importJson").addEventListener("change", importLocalStorage);
+  bindAdminDiagnostics();
 }
 
 function backupLocalStorage() {
