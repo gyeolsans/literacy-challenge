@@ -1,6 +1,11 @@
 (function () {
-  let roomChannel = null;
-  let subscribedRoomId = null;
+  const MAX_ROOM_PLAYERS = 4;
+  const STALE_ROOM_MINUTES = 30;
+  let activeRoomChannel = null;
+  let activeRoomPlayersChannel = null;
+  let activeOpenRoomsChannel = null;
+  let activeRoomId = null;
+  let activeRoomPlayersRoomId = null;
 
   function ensureOnline() {
     if (!window.SupabaseService?.hasSupabaseConfig?.().ok) {
@@ -78,12 +83,13 @@
 
   async function getOpenRooms() {
     const supabase = ensureOnline();
-    const since = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const since = new Date(Date.now() - STALE_ROOM_MINUTES * 60 * 1000).toISOString();
     const { data: rooms, error } = await supabase
       .from("rooms")
       .select("*")
       .eq("status", "waiting")
       .gte("created_at", since)
+      .not("host_user_id", "is", null)
       .order("created_at", { ascending: false })
       .limit(30);
     if (error) throw Object.assign(error, { stage: "rooms waiting list" });
@@ -94,14 +100,17 @@
     const { data: players, error: playerError } = await supabase
       .from("room_players")
       .select("*")
-      .in("room_id", roomIds)
-      .neq("status", "left");
+      .in("room_id", roomIds);
     if (playerError) throw Object.assign(playerError, { stage: "room_players list for rooms" });
 
-    return (rooms || []).map((room) => ({
-      ...room,
-      players: (players || []).filter((player) => player.room_id === room.id)
-    }));
+    return (rooms || [])
+      .map((room) => {
+        const roomPlayers = (players || []).filter((player) => player.room_id === room.id);
+        const activePlayers = roomPlayers.filter((player) => player.status !== "left");
+        const host = activePlayers.find((player) => player.user_id === room.host_user_id && player.is_host);
+        return { ...room, players: activePlayers, host };
+      })
+      .filter((room) => room.host && room.players.length < MAX_ROOM_PLAYERS);
   }
 
   async function joinRoom(room, user, isHost = false) {
@@ -114,6 +123,14 @@
     }
     if (!room?.id) throw new Error("입장할 room id가 없습니다.");
     if (!user?.id) throw new Error("온라인 user id가 없습니다.");
+    if (room.status !== "waiting") {
+      throw new Error(room.status === "cancelled" ? "취소된 방입니다." : "이미 종료되었거나 시작된 방입니다.");
+    }
+
+    const activePlayers = await getRoomPlayers(room.id);
+    if (!activePlayers.some((player) => player.user_id === user.id) && activePlayers.length >= MAX_ROOM_PLAYERS) {
+      throw new Error("방 정원이 가득 찼습니다.");
+    }
 
     const { data: existing, error: existingError } = await supabase
       .from("room_players")
@@ -131,6 +148,13 @@
       is_host: Boolean(isHost),
       status: isHost ? "ready" : "joined",
       is_ready: Boolean(isHost),
+      current_index: 0,
+      current_score: 0,
+      correct_count: 0,
+      partial_count: 0,
+      wrong_count: 0,
+      total_time: 0,
+      finished_at: null,
       joined_at: existing?.joined_at || new Date().toISOString()
     };
     const { data, error } = await supabase
@@ -163,6 +187,10 @@
 
   async function setReady(roomId, userId, isReady) {
     const supabase = ensureOnline();
+    const room = await getRoom(roomId);
+    if (!room) throw new Error("방 정보를 찾을 수 없습니다.");
+    if (room.host_user_id === userId) throw new Error("방장은 준비 버튼을 사용할 수 없습니다.");
+    if (room.status !== "waiting") throw new Error("이미 시작되었거나 종료된 방입니다.");
     const { data, error } = await supabase
       .from("room_players")
       .update({
@@ -185,13 +213,50 @@
 
   function canHostStartGame(players, hostUserId) {
     const activePlayers = (players || []).filter((player) => player.status !== "left");
-    const host = activePlayers.find((player) => player.user_id === hostUserId);
+    if (activePlayers.length < 2) return false;
     const guests = activePlayers.filter((player) => player.user_id !== hostUserId);
-    return Boolean(host && guests.length && guests.every((player) => player.is_ready));
+    if (!guests.length) return false;
+    return guests.every((player) => player.is_ready === true);
   }
 
   async function leaveRoom(roomId, userId) {
     const supabase = ensureOnline();
+    const room = await getRoom(roomId);
+    if (!room) throw new Error("방 정보를 찾을 수 없습니다.");
+    const players = await getRoomPlayers(roomId);
+    const me = players.find((player) => player.user_id === userId);
+    const isHost = room.host_user_id === userId || me?.is_host;
+
+    if (room.status === "waiting" && isHost) {
+      const finishedAt = new Date().toISOString();
+      const { error: playerError } = await supabase
+        .from("room_players")
+        .update({ status: "left", is_ready: false })
+        .eq("room_id", roomId)
+        .eq("user_id", userId);
+      if (playerError) throw Object.assign(playerError, { stage: "room_players host leave update" });
+
+      const { data, error } = await supabase
+        .from("rooms")
+        .update({ status: "cancelled", finished_at: finishedAt })
+        .eq("id", roomId)
+        .select()
+        .single();
+      if (error) throw Object.assign(error, { stage: "rooms cancel after host leave" });
+      return { room: data, cancelled: true };
+    }
+
+    if (room.status === "waiting") {
+      const { data, error } = await supabase
+        .from("room_players")
+        .delete()
+        .eq("room_id", roomId)
+        .eq("user_id", userId)
+        .select();
+      if (error) throw Object.assign(error, { stage: "room_players guest leave delete" });
+      return { left: true, deleted: true, players: data };
+    }
+
     const { data, error } = await supabase
       .from("room_players")
       .update({ status: "left", is_ready: false })
@@ -199,11 +264,22 @@
       .eq("user_id", userId)
       .select();
     if (error) throw Object.assign(error, { stage: "room_players leave update" });
-    return data;
+    return { left: true, players: data };
   }
 
-  async function startRoom(roomId) {
+  async function startRoom(roomId, userId = null) {
     const supabase = ensureOnline();
+    const currentUserId = userId || window.UserRemoteService?.getAnonymousUserId?.();
+    const currentRoom = await getRoom(roomId);
+    if (!currentRoom) throw new Error("방 정보를 찾을 수 없습니다.");
+    if (currentRoom.status !== "waiting") throw new Error("이미 시작되었거나 종료된 방입니다.");
+    if (currentUserId && currentRoom.host_user_id !== currentUserId) throw new Error("방장만 게임을 시작할 수 있습니다.");
+    const players = await getRoomPlayers(roomId);
+    if (!canHostStartGame(players, currentRoom.host_user_id)) {
+      const notReady = players.filter((player) => player.status !== "left" && player.user_id !== currentRoom.host_user_id && !player.is_ready);
+      throw new Error(notReady.length ? "아직 준비하지 않은 참가자가 있습니다." : "게임 시작 조건이 충족되지 않았습니다.");
+    }
+
     const startedAt = new Date().toISOString();
     const { data: room, error: roomError } = await supabase
       .from("rooms")
@@ -236,11 +312,14 @@
   }
 
   async function finishRoomPlayer(roomId, userId, resultData) {
-    return updateRoomPlayerProgress(roomId, userId, {
+    const updated = await updateRoomPlayerProgress(roomId, userId, {
       ...resultData,
       status: "finished",
       finished_at: new Date().toISOString()
     });
+    const players = await getRoomPlayers(roomId);
+    await finishRoomIfComplete(roomId, players);
+    return updated;
   }
 
   async function finishRoomIfComplete(roomId, players) {
@@ -268,23 +347,71 @@
 
   function subscribeRoom(roomId, callbacks) {
     const supabase = ensureOnline();
-    unsubscribeRoom();
-    subscribedRoomId = roomId;
-    const callback = typeof callbacks === "function"
-      ? callbacks
-      : (payload) => callbacks?.onChange?.(payload);
-    roomChannel = supabase
+    if (activeRoomChannel) unsubscribeRoomChannel();
+    activeRoomId = roomId;
+    const callback = typeof callbacks === "function" ? callbacks : (payload) => callbacks?.onRoomChange?.(payload);
+    activeRoomChannel = supabase
       .channel(`room-${roomId}`)
       .on("postgres_changes", { event: "*", schema: "public", table: "rooms", filter: `id=eq.${roomId}` }, callback)
+      .subscribe();
+    return activeRoomChannel;
+  }
+
+  function subscribeRoomPlayers(roomId, callback) {
+    const supabase = ensureOnline();
+    if (activeRoomPlayersChannel) unsubscribeRoomPlayers();
+    activeRoomPlayersRoomId = roomId;
+    activeRoomPlayersChannel = supabase
+      .channel(`room-players-${roomId}`)
       .on("postgres_changes", { event: "*", schema: "public", table: "room_players", filter: `room_id=eq.${roomId}` }, callback)
       .subscribe();
-    return roomChannel;
+    return activeRoomPlayersChannel;
+  }
+
+  function subscribeOpenRooms(callback) {
+    const supabase = ensureOnline();
+    unsubscribeOpenRooms();
+    activeOpenRoomsChannel = supabase
+      .channel("open-rooms")
+      .on("postgres_changes", { event: "*", schema: "public", table: "rooms" }, callback)
+      .on("postgres_changes", { event: "*", schema: "public", table: "room_players" }, callback)
+      .subscribe();
+    return activeOpenRoomsChannel;
+  }
+
+  function unsubscribeRoomChannel() {
+    if (activeRoomChannel?.unsubscribe) activeRoomChannel.unsubscribe();
+    activeRoomChannel = null;
+    activeRoomId = null;
+  }
+
+  function unsubscribeRoomPlayers() {
+    if (activeRoomPlayersChannel?.unsubscribe) activeRoomPlayersChannel.unsubscribe();
+    activeRoomPlayersChannel = null;
+    activeRoomPlayersRoomId = null;
+  }
+
+  function unsubscribeOpenRooms() {
+    if (activeOpenRoomsChannel?.unsubscribe) activeOpenRoomsChannel.unsubscribe();
+    activeOpenRoomsChannel = null;
   }
 
   function unsubscribeRoom() {
-    if (roomChannel?.unsubscribe) roomChannel.unsubscribe();
-    roomChannel = null;
-    subscribedRoomId = null;
+    unsubscribeRoomChannel();
+    unsubscribeRoomPlayers();
+  }
+
+  async function cleanupStaleRooms() {
+    const supabase = ensureOnline();
+    const before = new Date(Date.now() - STALE_ROOM_MINUTES * 60 * 1000).toISOString();
+    const { data, error } = await supabase
+      .from("rooms")
+      .update({ status: "cancelled", finished_at: new Date().toISOString() })
+      .eq("status", "waiting")
+      .lt("created_at", before)
+      .select();
+    if (error) throw Object.assign(error, { stage: "rooms stale cleanup" });
+    return data || [];
   }
 
   window.RoomService = {
@@ -292,6 +419,7 @@
     getRoom,
     getRoomPlayers,
     getOpenRooms,
+    cleanupStaleRooms,
     joinRoom,
     joinRoomById,
     findRoomByCode,
@@ -305,7 +433,11 @@
     finishRoomPlayer,
     finalizeRoomIfAllFinished: finishRoomIfComplete,
     subscribeRoom,
+    subscribeRoomPlayers,
+    subscribeOpenRooms,
     unsubscribeRoom,
+    unsubscribeRoomPlayers,
+    unsubscribeOpenRooms,
     updateRoomPlayerProgress,
     finishRoomIfComplete
   };

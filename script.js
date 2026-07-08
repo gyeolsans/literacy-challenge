@@ -1,4 +1,4 @@
-console.log("DEPLOY_VERSION", "supabase-restored-2026-07-08");
+console.log("DEPLOY_VERSION", "supabase-edge-ai-questions-2026-07-08");
 console.log("APP_CONFIG_AT_START", window.APP_CONFIG);
 
 const app = document.querySelector("#app");
@@ -19,7 +19,10 @@ const STORAGE_KEYS = {
   lastResult: "literacy.lastResult",
   adminAuthed: "literacy.adminAuthed",
   notice: "literacy.lastNotice",
-  anonymousUserId: "literacy.anonymousUserId"
+  anonymousUserId: "literacy.anonymousUserId",
+  currentRoomId: "currentRoomId",
+  currentRoomUserId: "currentRoomUserId",
+  currentRoomMode: "currentRoomMode"
 };
 
 const TYPE_LABELS = {
@@ -409,6 +412,19 @@ function showNotice(message, type = "info", timeout = 5200) {
   setStorage(STORAGE_KEYS.notice, { message, type, date: Date.now() });
   if (timeout) setTimeout(() => node.remove(), timeout);
 }
+
+function saveCurrentRoomSession(roomId, userId, mode) {
+  if (!roomId) return;
+  localStorage.setItem(STORAGE_KEYS.currentRoomId, roomId);
+  if (userId) localStorage.setItem(STORAGE_KEYS.currentRoomUserId, userId);
+  if (mode) localStorage.setItem(STORAGE_KEYS.currentRoomMode, mode);
+}
+
+function clearCurrentRoomSession() {
+  removeStorage(STORAGE_KEYS.currentRoomId);
+  removeStorage(STORAGE_KEYS.currentRoomUserId);
+  removeStorage(STORAGE_KEYS.currentRoomMode);
+}
 window.showNotice = showNotice;
 
 function isLocalFileMode() {
@@ -417,13 +433,8 @@ function isLocalFileMode() {
 
 async function checkApiAvailable() {
   if (isLocalFileMode()) return false;
-  try {
-    const response = await fetch("/api/generate-questions", { method: "OPTIONS" });
-    return response.ok || response.status === 405;
-  } catch (error) {
-    console.error("API availability check failed:", error);
-    return false;
-  }
+  if (!window.SupabaseService?.hasSupabaseConfig?.().ok) return false;
+  return true;
 }
 
 function validateQuestion(q) {
@@ -810,13 +821,66 @@ function gradeAnswer({ question, userAnswer }) {
   });
 }
 
+async function saveAIQuestionsToRemoteCache(questions, settings) {
+  if (!window.SupabaseService?.isConfigured?.()) return;
+  const cleaned = sanitizeQuestions(questions);
+  if (!cleaned.length) return;
+  try {
+    const supabase = window.SupabaseService.getSupabaseClient();
+    const user = await window.UserRemoteService?.getOrCreateUser?.(getNickname() || "익명").catch(() => null);
+    const userId = user?.id || null;
+    const { error } = await supabase.from("questions_cache").insert({
+      difficulty: settings.difficulty,
+      selected_types: settings.selectedTypes || [],
+      include_short_answer: settings.includeShortAnswer !== false,
+      question_count: cleaned.length,
+      questions: cleaned,
+      created_by: userId
+    });
+    if (error) throw error;
+  } catch (error) {
+    console.warn("questions_cache save skipped:", error);
+  }
+}
+
+async function getRemoteCachedAIQuestions(settings = {}) {
+  if (!window.SupabaseService?.isConfigured?.()) return [];
+  try {
+    const supabase = window.SupabaseService.getSupabaseClient();
+    let query = supabase
+      .from("questions_cache")
+      .select("questions, created_at")
+      .order("created_at", { ascending: false })
+      .limit(10);
+    if (settings.difficulty && settings.difficulty !== "all") query = query.eq("difficulty", settings.difficulty);
+    const { data, error } = await query;
+    if (error) throw error;
+    return sanitizeQuestions((data || []).flatMap((row) => Array.isArray(row.questions) ? row.questions : []));
+  } catch (error) {
+    console.warn("remote cached AI questions load skipped:", error);
+    return [];
+  }
+}
+
+async function getStoredAIQuestions(settings = {}) {
+  return mergeQuestionPools([
+    await getRemoteCachedAIQuestions(settings),
+    getSavedAIQuestions()
+  ]);
+}
+
 async function generateAIQuestions(settings) {
   if (isLocalFileMode()) {
-    showNotice("현재 로컬 파일로 실행 중이므로 AI 문제 생성 API는 작동하지 않습니다. 저장된 문제 또는 샘플 문제로 진행됩니다.", "warning");
+    showNotice("현재 로컬 파일로 실행 중이므로 Supabase Edge Function을 호출할 수 없습니다. 저장된 문제 또는 샘플 문제로 진행됩니다.", "warning");
     return [];
   }
 
-  const buttons = [...document.querySelectorAll("[data-start-ai]")];
+  if (!window.SupabaseService?.hasSupabaseConfig?.().ok) {
+    showNotice("Supabase 설정이 없어 AI 문제 생성 Edge Function을 호출할 수 없습니다. 저장된 문제 또는 샘플 문제로 진행합니다.", "warning");
+    return [];
+  }
+
+  const buttons = [...document.querySelectorAll("[data-start-ai], [data-regenerate-ai], [data-start-ai-boost]")];
   const labels = buttons.map((button) => button.textContent);
   buttons.forEach((button) => {
     button.disabled = true;
@@ -825,28 +889,26 @@ async function generateAIQuestions(settings) {
   showNotice("AI 문제 생성 중...", "info", 0);
 
   try {
-    const requestedCount = Math.min(Number(settings.count || 5) + 3, 20);
-    const response = await fetch("/api/generate-questions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    const supabase = window.SupabaseService.getSupabaseClient();
+    const { data, error } = await supabase.functions.invoke("generate-questions", {
+      body: {
         difficulty: settings.difficulty,
-        count: requestedCount,
-        includeShortAnswer: settings.includeShortAnswer,
-        selectedTypes: settings.selectedTypes,
+        count: Number(settings.count || 5),
+        includeShortAnswer: settings.includeShortAnswer !== false,
+        selectedTypes: settings.selectedTypes || [],
         difficultyBoost: Boolean(settings.difficultyBoost)
-      })
+      }
     });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || "AI 문제 생성에 실패했습니다.");
+    if (error) throw error;
     const questions = sanitizeQuestions(Array.isArray(data.questions) ? data.questions : []);
     if (!questions.length) throw new Error("AI가 사용할 수 있는 형식의 문제를 반환하지 않았습니다.");
     saveAIQuestionsToLocal(questions);
-    showNotice("AI 문제 생성이 완료되었습니다.", "success");
+    await saveAIQuestionsToRemoteCache(questions, settings);
+    showNotice(`AI 문제 ${questions.length}개를 생성했습니다.`, "success");
     return questions;
   } catch (error) {
     console.error("AI question generation failed:", error);
-    showNotice("AI 문제 생성에 실패했습니다. 저장된 문제 또는 샘플 문제로 테스트를 시작합니다.", "warning");
+    showNotice("AI 문제 생성에 실패했습니다. 저장된 문제 또는 샘플 문제로 진행합니다.", "warning");
     return [];
   } finally {
     buttons.forEach((button, index) => {
@@ -887,7 +949,7 @@ function getSettingsFromForm() {
   };
 }
 
-async function startTest(useAI = false, difficultyBoostOverride = false) {
+async function startTest(sourceMode = "ai", difficultyBoostOverride = false) {
   try {
     if (!ensureNickname()) return;
     const existing = loadCurrentTest();
@@ -904,28 +966,33 @@ async function startTest(useAI = false, difficultyBoostOverride = false) {
 
     const settings = getSettingsFromForm();
     if (difficultyBoostOverride) settings.difficultyBoost = true;
+    const mode = typeof sourceMode === "boolean" ? (sourceMode ? "ai" : "saved") : sourceMode;
     let generatedAIQuestions = [];
 
-    if (useAI && !isLocalFileMode()) {
+    if (mode === "ai" && !isLocalFileMode()) {
       generatedAIQuestions = await generateAIQuestions(settings);
-    } else if (useAI && isLocalFileMode()) {
-      showNotice("현재 로컬 파일로 실행 중이므로 AI 문제 생성 API는 작동하지 않습니다. 저장된 문제 또는 샘플 문제로 진행됩니다.", "warning");
+    } else if (mode === "ai" && isLocalFileMode()) {
+      showNotice("현재 로컬 파일로 실행 중이므로 Supabase Edge Function을 호출할 수 없습니다. 저장된 문제 또는 샘플 문제로 진행됩니다.", "warning");
     }
 
-    const savedAIQuestions = getSavedAIQuestions();
+    const savedAIQuestions = mode === "sample" ? [] : await getStoredAIQuestions(settings);
     const sampleQuestions = sanitizeQuestions(SAMPLE_QUESTIONS);
-    const combinedPool = mergeQuestionPools([
-      generatedAIQuestions,
-      savedAIQuestions,
-      sampleQuestions
-    ]);
+    const combinedPool = mode === "sample"
+      ? sampleQuestions
+      : mergeQuestionPools([
+        generatedAIQuestions,
+        savedAIQuestions,
+        sampleQuestions
+      ]);
 
-    if (!generatedAIQuestions.length && savedAIQuestions.length) {
+    if (mode === "sample") {
+      showNotice("샘플 문제로 테스트를 시작합니다.", "info");
+    } else if (!generatedAIQuestions.length && savedAIQuestions.length) {
       showNotice("저장된 AI 문제와 샘플 문제를 함께 사용해 테스트를 시작합니다.", "info");
     } else if (!generatedAIQuestions.length && !savedAIQuestions.length && sampleQuestions.length) {
       showNotice("샘플 문제로 테스트를 시작합니다.", "info");
     } else if (generatedAIQuestions.length) {
-      showNotice("AI 생성 문제, 저장된 문제, 샘플 문제를 함께 사용해 문제 수를 맞춥니다.", "success");
+      showNotice("AI 생성 문제를 우선 사용하고 부족하면 저장된 문제와 샘플 문제로 보완합니다.", "success");
     }
 
     const selection = selectQuestionsWithFallback({ questions: combinedPool, settings });
@@ -1037,9 +1104,15 @@ function buildResultFromDetails(base, details) {
   };
 }
 
-function getQuestionSetForMultiplayer(settings) {
+async function getQuestionSetForMultiplayer(settings) {
+  const source = settings.questionSource || "ai";
+  const generatedAIQuestions = source === "ai" ? await generateAIQuestions(settings) : [];
+  const savedAIQuestions = source === "sample" ? [] : await getStoredAIQuestions(settings);
+  const sampleQuestions = sanitizeQuestions(SAMPLE_QUESTIONS);
   const questionSet = prepareTestQuestions({
-    questions: mergeQuestionPools([getSavedAIQuestions(), SAMPLE_QUESTIONS]),
+    questions: source === "sample"
+      ? sampleQuestions
+      : mergeQuestionPools([generatedAIQuestions, savedAIQuestions, sampleQuestions]),
     settings
   });
   return sanitizeQuestions(questionSet);
@@ -1118,6 +1191,126 @@ function roomStartBlockReason(players, hostUserId) {
   if (!nonHostPlayers.length) return "방장 외 참가자가 필요합니다.";
   if (!nonHostPlayers.every((player) => player.is_ready)) return "아직 준비하지 않은 참가자가 있습니다.";
   return "";
+}
+
+function roomPlayersHtml(players, profileByUserId = new Map()) {
+  return (players || []).map((player) => {
+    const profile = profileByUserId.get(player.user_id);
+    const readyText = player.is_host ? "방장" : player.is_ready ? "준비 완료" : "대기 중";
+    return `<div class="history-item">
+      <div class="row between">
+        <strong>${tierNick(player.nickname, profile)}</strong>
+        <div class="badges">${player.is_host ? `<span class="badge hard">방장</span>` : ""}<span class="badge ${player.is_ready ? "easy" : "normal"}">${readyText}</span></div>
+      </div>
+      <p class="muted">정답 ${Number(player.correct_count || 0)} · 부분 ${Number(player.partial_count || 0)} · 시간 ${secondsLabel(player.total_time || 0)}</p>
+    </div>`;
+  }).join("") || `<div class="empty">참가자 정보를 불러오는 중입니다.</div>`;
+}
+
+function roomLobbyActionsHtml(room, players, user, me) {
+  const isHost = room.host_user_id === user.id || me?.is_host;
+  const canStart = canHostStartGame(players, room.host_user_id);
+  const blockReason = roomStartBlockReason(players, room.host_user_id);
+  if (isHost) {
+    return `
+      <p class="muted">${canStart ? "모든 참가자가 준비했습니다. 게임을 시작할 수 있습니다." : blockReason}</p>
+      <div class="actions" style="margin-top:12px"><button class="btn primary" data-start-room-game ${canStart ? "" : "disabled"}>게임 시작</button></div>
+    `;
+  }
+  return `
+    <p class="muted">방장이 게임을 시작할 때까지 기다리는 중입니다.</p>
+    <div class="actions" style="margin-top:12px">
+      <button class="btn ${me?.is_ready ? "" : "primary"}" data-toggle-ready="${me?.is_ready ? "false" : "true"}">${me?.is_ready ? "준비 취소" : "준비하기"}</button>
+    </div>
+  `;
+}
+
+function roomProgressHtml(players = [], totalQuestions = 0) {
+  return (players || []).map((player) => {
+    const index = Math.min(Number(player.current_index || 0), totalQuestions || Number(player.current_index || 0));
+    const percent = totalQuestions ? Math.round((index / totalQuestions) * 100) : 0;
+    return `<div class="history-item">
+      <div class="row between">
+        <strong>${escapeHtml(player.nickname || "익명")}</strong>
+        <span class="badge ${player.status === "finished" ? "easy" : player.status === "left" ? "hard" : "normal"}">${player.status || "playing"}</span>
+      </div>
+      <div class="progress" style="margin-top:8px"><span style="width:${percent}%"></span></div>
+      <p class="muted">진행 ${index}/${totalQuestions || "-"} · 점수 ${Number(player.current_score || 0)} · 정답 ${Number(player.correct_count || 0)} · 부분 ${Number(player.partial_count || 0)} · 시간 ${secondsLabel(player.total_time || 0)}</p>
+    </div>`;
+  }).join("") || `<div class="empty">참가자 진행률을 불러오는 중입니다.</div>`;
+}
+
+async function updateRoomProgressPanel(roomId, totalQuestions) {
+  const target = document.querySelector("#roomProgressList");
+  if (!target) return;
+  const players = await window.RoomService.getRoomPlayers(roomId);
+  target.innerHTML = roomProgressHtml(players, totalQuestions);
+}
+
+async function updateRoomLobbyPanels(room, user) {
+  if (activeRoomContext?.roomId !== room.id || activeRoomContext.view !== "lobby") return;
+  const players = await window.RoomService.getRoomPlayers(room.id);
+  const profiles = await window.RankedMatchService?.getRankingProfiles?.().catch(() => []);
+  const decoratedProfiles = window.RatingUtils.decorateProfilesWithPercentTiers(profiles || []);
+  const profileByUserId = new Map(decoratedProfiles.map((profile) => [profile.user_id, profile]));
+  const me = players.find((player) => player.user_id === user.id);
+  const list = document.querySelector("#roomPlayersList");
+  if (list) list.innerHTML = roomPlayersHtml(players, profileByUserId);
+  const actions = document.querySelector("#roomLobbyActions");
+  if (actions) actions.innerHTML = roomLobbyActionsHtml(room, players, user, me);
+  bindRoomLobbyDynamicActions(room, user);
+}
+
+async function handleRoomRealtimeStatus(roomId, user) {
+  const latestRoom = await window.RoomService.getRoom(roomId);
+  if (!latestRoom) {
+    showNotice("방 정보를 찾을 수 없습니다.", "warning");
+    clearCurrentRoomSession();
+    showView("rooms");
+    return;
+  }
+  if (latestRoom.status === "playing" && activeRoomContext?.view !== "play") {
+    showNotice("게임이 시작되었습니다.", "success");
+    saveCurrentRoomSession(roomId, user?.id, "playing");
+    renderRoomPlay(latestRoom);
+    return;
+  }
+  if (latestRoom.status === "finished" && activeRoomContext?.view !== "result") {
+    saveCurrentRoomSession(roomId, user?.id, "result");
+    renderRoomResult(latestRoom);
+    return;
+  }
+  if (latestRoom.status === "cancelled") {
+    showNotice("방장이 나가서 방이 취소되었습니다.", "warning", 0);
+    clearCurrentRoomSession();
+    window.RoomService.unsubscribeRoom();
+    showView("rooms");
+  }
+}
+
+function bindRoomLobbyDynamicActions(room, user) {
+  document.querySelector("[data-toggle-ready]")?.addEventListener("click", async (event) => {
+    try {
+      await window.RoomService.setReady(room.id, user.id, event.currentTarget.dataset.toggleReady === "true");
+    } catch (error) {
+      console.error("ready update failed:", error);
+      showNotice(`준비 상태 변경 실패: ${friendlyOnlineError(error)}`, "error", 0);
+    }
+  });
+  document.querySelector("[data-start-room-game]")?.addEventListener("click", async () => {
+    if (isStartingRoomGame) return;
+    try {
+      isStartingRoomGame = true;
+      const startedRoom = await window.RoomService.startRoom(room.id, user.id);
+      saveCurrentRoomSession(room.id, user.id, "playing");
+      renderRoomPlay(startedRoom);
+    } catch (error) {
+      console.error("room start failed:", error);
+      showNotice(`방 시작 실패: ${friendlyOnlineError(error)}`, "error", 0);
+    } finally {
+      isStartingRoomGame = false;
+    }
+  });
 }
 
 function tierNick(nickname, tierOrProfile = "랭킹없음") {
@@ -1356,9 +1549,18 @@ function aggregateStats(histories = getStorage(STORAGE_KEYS.histories, [])) {
 function showView(view) {
   clearInterval(timerId);
   const [baseView, detailId] = String(view || "home").split(":");
-  if (!["rooms", "room-lobby", "room-play", "room-result"].includes(baseView)) {
+  if (baseView === "rooms") {
     window.RoomService?.unsubscribeRoom?.();
     activeRoomContext = null;
+  }
+  if (!["rooms", "room-lobby", "room-play", "room-result"].includes(baseView)) {
+    window.RoomService?.unsubscribeRoom?.();
+    window.RoomService?.unsubscribeOpenRooms?.();
+    activeRoomContext = null;
+  }
+  if (baseView === "ranked") {
+    window.RankedMatchService?.unsubscribeRankedMatch?.();
+    activeRankedContext = null;
   }
   if (!["ranked", "ranked-queue", "ranked-play", "ranked-result"].includes(baseView)) {
     window.RankedMatchService?.unsubscribeRankedMatch?.();
@@ -1453,7 +1655,7 @@ function renderSettings() {
         <h2>테스트 설정</h2>
         <p class="muted">난이도, 문제 수, 유형을 고른 뒤 AI 생성 또는 저장된 문제로 시작하세요.</p>
       </div>
-      ${isLocalFileMode() ? `<div class="card notice-inline warning">현재 로컬 파일로 실행 중이므로 AI 문제 생성 API는 작동하지 않습니다. Vercel에 배포하면 AI 문제 생성이 작동합니다. 지금은 저장된 문제 또는 샘플 문제로 진행됩니다.</div>` : ""}
+      ${isLocalFileMode() ? `<div class="card notice-inline warning">현재 로컬 파일로 실행 중이므로 Supabase Edge Function을 호출할 수 없습니다. npm run dev 또는 배포 주소로 접속하세요. 지금은 저장된 문제 또는 샘플 문제로 진행됩니다.</div>` : ""}
       ${progress ? `<div class="card notice-inline info row between"><span>테스트 복구가 가능합니다. ${progress.currentIndex + 1} / ${progress.questions.length}번 문제부터 이어서 풀 수 있습니다.</span><button class="btn success" data-resume-test>이어서 풀기</button></div>` : ""}
       <div class="card">
         <div class="form-grid">
@@ -1493,7 +1695,9 @@ function renderSettings() {
           <button class="btn" data-regenerate-ai>같은 설정으로 AI 문제 다시 생성</button>
           <button class="btn danger" data-start-ai-boost>더 어렵게 생성</button>
           <button class="btn" data-start-saved>저장된 AI 문제로 시작</button>
+          <button class="btn" data-start-sample>샘플 문제로 시작</button>
         </div>
+        <p id="aiGenerationStatus" class="muted" style="margin-top:10px">AI 생성은 Supabase Edge Function generate-questions를 통해 실행됩니다.</p>
       </div>
     </section>
   `;
@@ -1507,14 +1711,15 @@ function renderSettings() {
   };
   difficultySelect?.addEventListener("change", updateDifficultyDescription);
   updateDifficultyDescription();
-  document.querySelector("[data-start-ai]")?.addEventListener("click", () => startTest(true));
-  document.querySelector("[data-regenerate-ai]")?.addEventListener("click", () => startTest(true));
+  document.querySelector("[data-start-ai]")?.addEventListener("click", () => startTest("ai"));
+  document.querySelector("[data-regenerate-ai]")?.addEventListener("click", () => startTest("ai"));
   document.querySelector("[data-start-ai-boost]")?.addEventListener("click", () => {
     const boost = document.querySelector("#difficultyBoost");
     if (boost) boost.checked = true;
-    startTest(true, true);
+    startTest("ai", true);
   });
-  document.querySelector("[data-start-saved]")?.addEventListener("click", () => startTest(false));
+  document.querySelector("[data-start-saved]")?.addEventListener("click", () => startTest("saved"));
+  document.querySelector("[data-start-sample]")?.addEventListener("click", () => startTest("sample"));
   document.querySelector("[data-resume-test]")?.addEventListener("click", () => {
     testState = loadCurrentTest();
     if (testState) {
@@ -2099,6 +2304,7 @@ function renderRooms() {
           <div class="form-grid" style="margin-top:12px">
             <select id="roomDifficulty"><option value="easy">easy</option><option value="normal" selected>normal</option><option value="hard">hard</option><option value="expert">expert</option></select>
             <select id="roomCount"><option value="5">5문제</option><option value="10">10문제</option><option value="15">15문제</option></select>
+            <select id="roomQuestionSource"><option value="ai" selected>AI 문제 사용</option><option value="saved">저장된 문제 사용</option><option value="sample">샘플 문제 사용</option></select>
             <label class="check"><input id="roomShort" type="checkbox" checked /> 주관식 포함</label>
             <label class="check"><input id="roomTimer" type="checkbox" checked /> 시간 제한</label>
           </div>
@@ -2137,11 +2343,12 @@ function renderRooms() {
         count: Number(document.querySelector("#roomCount")?.value || 5),
         includeShortAnswer: Boolean(document.querySelector("#roomShort")?.checked),
         useTimer: Boolean(document.querySelector("#roomTimer")?.checked),
+        questionSource: document.querySelector("#roomQuestionSource")?.value || "ai",
         secondsPerQuestion: 60,
         selectedTypes: Object.keys(TYPE_LABELS)
       };
       const user = await window.UserRemoteService.getOrCreateUser(getNickname() || "익명");
-      const questionSet = getQuestionSetForMultiplayer(settings);
+      const questionSet = await getQuestionSetForMultiplayer(settings);
       if (!questionSet.length) throw new Error("question_set 생성 실패: 출제 가능한 문제가 없습니다.");
       const { room, player } = await window.RoomService.createRoom(settings, user, questionSet);
       showNotice(`방 생성 성공: ${room.room_code}`, "success");
@@ -2162,7 +2369,13 @@ function renderRooms() {
     joinRoomByCode(code, document.querySelector("[data-join-room]"));
   });
   document.querySelector("[data-refresh-rooms]")?.addEventListener("click", renderOpenRoomList);
-  if (configured) renderOpenRoomList();
+  if (configured) {
+    window.RoomService.cleanupStaleRooms?.().catch((error) => console.error("stale room cleanup failed:", error));
+    renderOpenRoomList();
+    window.RoomService.subscribeOpenRooms?.(() => {
+      if ((location.hash.replace("#", "") || "home") === "rooms") renderOpenRoomList();
+    });
+  }
 }
 
 async function renderOpenRoomList() {
@@ -2170,6 +2383,7 @@ async function renderOpenRoomList() {
   if (!list) return;
   try {
     list.innerHTML = `<div class="empty">대기 방을 불러오는 중입니다.</div>`;
+    await window.RoomService.cleanupStaleRooms?.();
     const rooms = await window.RoomService.getOpenRooms();
     list.innerHTML = rooms.length ? rooms.map((room) => {
       const players = room.players || [];
@@ -2230,20 +2444,40 @@ async function renderRoomLobbyById(roomId) {
     app.innerHTML = `<section class="section"><div class="empty">방을 찾을 수 없습니다.</div></section>`;
     return;
   }
+  if (room.status === "playing") return renderRoomPlay(room);
+  if (room.status === "finished") return renderRoomResult(room);
+  if (room.status === "cancelled") {
+    clearCurrentRoomSession();
+    showNotice("취소된 방입니다.", "warning");
+    return showView("rooms");
+  }
   renderRoomLobby(room);
 }
 
 async function renderRoomLobby(room, initialPlayers = []) {
+  if (!room?.id) return showView("rooms");
+  room = await window.RoomService.getRoom(room.id);
+  if (!room) {
+    showNotice("방 정보를 찾을 수 없습니다.", "warning");
+    clearCurrentRoomSession();
+    return showView("rooms");
+  }
+  if (room.status === "playing") return renderRoomPlay(room);
+  if (room.status === "finished") return renderRoomResult(room);
+  if (room.status === "cancelled") {
+    showNotice("방장이 나가서 방이 취소되었습니다.", "warning", 0);
+    clearCurrentRoomSession();
+    return showView("rooms");
+  }
   const user = await window.UserRemoteService.getOrCreateUser(getNickname() || "익명");
-  let players = initialPlayers.length ? initialPlayers : await window.RoomService.getRoomPlayers(room.id);
+  let players = await window.RoomService.getRoomPlayers(room.id);
   const profiles = await window.RankedMatchService?.getRankingProfiles?.().catch(() => []);
   const decoratedProfiles = window.RatingUtils.decorateProfilesWithPercentTiers(profiles || []);
   const profileByUserId = new Map(decoratedProfiles.map((profile) => [profile.user_id, profile]));
   const me = players.find((player) => player.user_id === user.id);
-  const isHost = room.host_user_id === user.id || me?.is_host;
-  const canStart = canHostStartGame(players, room.host_user_id);
-  const blockReason = roomStartBlockReason(players, room.host_user_id);
   activeRoomContext = { roomId: room.id, view: "lobby" };
+  saveCurrentRoomSession(room.id, user.id, "waiting");
+  window.RoomService.unsubscribeOpenRooms?.();
   if (location.hash !== `#room-lobby:${room.id}`) location.hash = `room-lobby:${room.id}`;
 
   app.innerHTML = `
@@ -2275,72 +2509,38 @@ async function renderRoomLobby(room, initialPlayers = []) {
       </div>
       <div class="card">
         <h3>참가자</h3>
-        <div class="table-list">
-          ${players.map((player) => {
-            const profile = profileByUserId.get(player.user_id);
-            const readyText = player.is_host ? "방장" : player.is_ready ? "준비 완료" : "대기 중";
-            return `<div class="history-item">
-              <div class="row between">
-                <strong>${tierNick(player.nickname, profile)}</strong>
-                <div class="badges">${player.is_host ? `<span class="badge hard">방장</span>` : ""}<span class="badge ${player.is_ready ? "easy" : "normal"}">${readyText}</span></div>
-              </div>
-              <p class="muted">정답 ${Number(player.correct_count || 0)} · 부분 ${Number(player.partial_count || 0)} · 시간 ${secondsLabel(player.total_time || 0)}</p>
-            </div>`;
-          }).join("") || `<div class="empty">참가자 정보를 불러오는 중입니다.</div>`}
+        <div class="table-list" id="roomPlayersList">
+          ${roomPlayersHtml(players, profileByUserId)}
         </div>
       </div>
-      <div class="card">
-        ${isHost ? `
-          <p class="muted">${canStart ? "모든 참가자가 준비했습니다. 게임을 시작할 수 있습니다." : blockReason}</p>
-          <div class="actions" style="margin-top:12px"><button class="btn primary" data-start-room-game ${canStart ? "" : "disabled"}>게임 시작</button></div>
-        ` : `
-          <p class="muted">방장이 게임을 시작할 때까지 기다리는 중입니다.</p>
-          <div class="actions" style="margin-top:12px">
-            <button class="btn ${me?.is_ready ? "" : "primary"}" data-toggle-ready="${me?.is_ready ? "false" : "true"}">${me?.is_ready ? "준비 취소" : "준비하기"}</button>
-          </div>
-        `}
+      <div class="card" id="roomLobbyActions">
+        ${roomLobbyActionsHtml(room, players, user, me)}
       </div>
     </section>
   `;
   document.querySelector("[data-copy-room-code]")?.addEventListener("click", () => copyRoomCode(room.room_code, false));
   document.querySelector("[data-copy-room-share]")?.addEventListener("click", () => copyRoomCode(room.room_code, true));
-  document.querySelector("[data-toggle-ready]")?.addEventListener("click", async (event) => {
-    await window.RoomService.setReady(room.id, user.id, event.currentTarget.dataset.toggleReady === "true");
-    renderRoomLobby(await window.RoomService.getRoom(room.id));
-  });
-  document.querySelector("[data-start-room-game]")?.addEventListener("click", async () => {
-    if (isStartingRoomGame) return;
-    try {
-      isStartingRoomGame = true;
-      const latestPlayers = await window.RoomService.getRoomPlayers(room.id);
-      if (!canHostStartGame(latestPlayers, room.host_user_id)) throw new Error(roomStartBlockReason(latestPlayers, room.host_user_id));
-      const startedRoom = await window.RoomService.startRoom(room.id);
-      renderRoomPlay(startedRoom);
-    } catch (error) {
-      console.error("room start failed:", error);
-      showNotice(`방 시작 실패: ${friendlyOnlineError(error)}`, "error");
-    } finally {
-      isStartingRoomGame = false;
-    }
-  });
+  bindRoomLobbyDynamicActions(room, user);
   document.querySelector("[data-leave-room]")?.addEventListener("click", async () => {
-    await window.RoomService.leaveRoom(room.id, user.id).catch((error) => console.error("leave room failed:", error));
-    window.RoomService.unsubscribeRoom();
-    showView("rooms");
+    try {
+      await window.RoomService.leaveRoom(room.id, user.id);
+      clearCurrentRoomSession();
+      window.RoomService.unsubscribeRoom();
+      showView("rooms");
+    } catch (error) {
+      console.error("leave room failed:", error);
+      showNotice(`방 나가기 실패: ${friendlyOnlineError(error)}`, "error", 0);
+    }
   });
-  window.RoomService.subscribeRoom(room.id, async () => {
+  window.RoomService.subscribeRoom(room.id, {
+    onRoomChange: async () => {
+      if (activeRoomContext?.roomId !== room.id) return;
+      await handleRoomRealtimeStatus(room.id, user);
+    }
+  });
+  window.RoomService.subscribeRoomPlayers(room.id, async () => {
     if (activeRoomContext?.roomId !== room.id) return;
-    const latestRoom = await window.RoomService.getRoom(room.id);
-    if (!latestRoom) return;
-    if (latestRoom.status === "playing" && activeRoomContext.view !== "play") {
-      renderRoomPlay(latestRoom);
-      return;
-    }
-    if (latestRoom.status === "finished" && activeRoomContext.view !== "result") {
-      renderRoomResult(latestRoom);
-      return;
-    }
-    if (activeRoomContext.view === "lobby") renderRoomLobby(latestRoom);
+    if (activeRoomContext.view === "lobby") await updateRoomLobbyPanels(room, user);
   });
 }
 
@@ -2401,11 +2601,13 @@ async function startRankedMatch() {
       count: 5,
       includeShortAnswer: true,
       selectedTypes: Object.keys(TYPE_LABELS),
-      questionSet: getQuestionSetForMultiplayer({
+      questionSource: "ai",
+      questionSet: await getQuestionSetForMultiplayer({
         difficulty: "normal",
         count: 5,
         includeShortAnswer: true,
-        selectedTypes: Object.keys(TYPE_LABELS)
+        selectedTypes: Object.keys(TYPE_LABELS),
+        questionSource: "ai"
       })
     };
     if (!settings.questionSet.length) throw new Error("question_set 생성 실패");
@@ -2435,6 +2637,11 @@ async function renderRankedQueueById(matchId) {
   const match = await window.RankedMatchService.getMatch(matchId);
   if (!match) return showView("ranked");
   if (match.status === "playing") return renderRankedPlay(match, user, profile);
+  if (match.status === "finished") return renderRankedResult(match, user);
+  if (match.status === "cancelled") {
+    showNotice("랭킹전 매칭이 취소되었습니다.", "info");
+    return showView("ranked");
+  }
   renderRankedQueue(match, user, profile);
 }
 
@@ -2472,6 +2679,10 @@ function renderRankedQueue(match, user, profile) {
       showNotice("매칭 완료! 대결을 시작합니다.", "success");
       renderRankedPlay(latest, user, profile);
     }
+    if (latest?.status === "cancelled") {
+      showNotice("랭킹전 매칭이 취소되었습니다.", "info");
+      showView("ranked");
+    }
   });
 }
 
@@ -2490,21 +2701,49 @@ async function copyRoomCode(roomCode, share = false) {
 async function renderRoomPlayById(roomId) {
   const room = await window.RoomService.getRoom(roomId);
   if (!room) return showView("rooms");
+  if (room.status === "waiting") return renderRoomLobby(room);
+  if (room.status === "finished") return renderRoomResult(room);
+  if (room.status === "cancelled") {
+    clearCurrentRoomSession();
+    showNotice("취소된 방입니다.", "warning");
+    return showView("rooms");
+  }
   renderRoomPlay(room);
 }
 
 async function renderRoomPlay(room) {
+  room = await window.RoomService.getRoom(room.id);
+  if (!room) return showView("rooms");
+  if (room.status === "waiting") return renderRoomLobby(room);
+  if (room.status === "finished") return renderRoomResult(room);
+  if (room.status === "cancelled") {
+    clearCurrentRoomSession();
+    showNotice("방장이 나가서 방이 취소되었습니다.", "warning", 0);
+    return showView("rooms");
+  }
   const user = await window.UserRemoteService.getOrCreateUser(getNickname() || "익명");
   activeRoomContext = { roomId: room.id, view: "play" };
+  saveCurrentRoomSession(room.id, user.id, "playing");
   if (location.hash !== `#room-play:${room.id}`) location.hash = `room-play:${room.id}`;
   if (!multiplayerState || multiplayerState.mode !== "room" || multiplayerState.room?.id !== room.id || multiplayerState.isFinished) {
     multiplayerState = createMultiplayerState({ mode: "room", room, user });
   }
   renderMultiplayerQuestion();
-  window.RoomService.subscribeRoom(room.id, async () => {
+  window.RoomService.subscribeRoom(room.id, {
+    onRoomChange: async () => {
+      if (activeRoomContext?.roomId !== room.id) return;
+      const latestRoom = await window.RoomService.getRoom(room.id);
+      if (latestRoom?.status === "finished" && activeRoomContext.view !== "result") renderRoomResult(latestRoom);
+      if (latestRoom?.status === "cancelled") {
+        showNotice("방이 취소되었습니다.", "warning", 0);
+        clearCurrentRoomSession();
+        showView("rooms");
+      }
+    }
+  });
+  window.RoomService.subscribeRoomPlayers(room.id, async () => {
     if (activeRoomContext?.roomId !== room.id) return;
-    const latestRoom = await window.RoomService.getRoom(room.id);
-    if (latestRoom?.status === "finished" && activeRoomContext.view !== "result") renderRoomResult(latestRoom);
+    await updateRoomProgressPanel(room.id, multiplayerState?.questions?.length || room.question_count || 0);
   });
 }
 
@@ -2513,6 +2752,11 @@ async function renderRankedPlayById(matchId) {
   const profile = await window.UserRemoteService.createRankingProfileIfNeeded(user);
   const match = await window.RankedMatchService.getMatch(matchId);
   if (!match) return showView("ranked");
+  if (match.status === "finished") return renderRankedResult(match, user);
+  if (match.status === "cancelled") {
+    showNotice("랭킹전 매치가 취소되었습니다.", "info");
+    return showView("ranked");
+  }
   renderRankedPlay(match, user, profile);
 }
 
@@ -2527,6 +2771,10 @@ function renderRankedPlay(match, user, profile) {
     if (activeRankedContext?.matchId !== match.id) return;
     const latest = await window.RankedMatchService.getMatch(match.id);
     if (latest?.status === "finished" && activeRankedContext.view !== "result") renderRankedResult(latest, user);
+    if (latest?.status === "cancelled") {
+      showNotice("랭킹전 매치가 취소되었습니다.", "info");
+      showView("ranked");
+    }
   });
 }
 
@@ -2572,6 +2820,14 @@ function renderMultiplayerQuestion() {
           <button class="btn primary" data-submit-multi>${number === total ? "결과 제출" : "다음 문제"}</button>
         </div>
       </div>
+      ${state.mode === "room" ? `
+        <div class="card">
+          <h3>참가자 진행률</h3>
+          <div id="roomProgressList" class="table-list" style="margin-top:12px">
+            <div class="empty">참가자 진행률을 불러오는 중입니다.</div>
+          </div>
+        </div>
+      ` : ""}
     </section>
   `;
   const area = document.querySelector("#answerArea");
@@ -2592,6 +2848,7 @@ function renderMultiplayerQuestion() {
     });
   }
   document.querySelector("[data-submit-multi]")?.addEventListener("click", () => submitMultiplayerAnswer(false));
+  if (state.mode === "room") updateRoomProgressPanel(state.room.id, total).catch((error) => console.error("room progress refresh failed:", error));
   startMultiplayerTimer();
 }
 
@@ -2691,10 +2948,17 @@ async function finishMultiplayerTest() {
     isSubmittingAnswer = false;
     const summary = multiplayerSummary(state, { rating: state.profile?.rating || 1000 });
     if (state.mode === "room") {
-      await updateMultiplayerProgress(true);
-      const players = await window.RoomService.getRoomPlayers(state.room.id);
-      await window.RoomService.finishRoomIfComplete(state.room.id, players);
-      renderRoomResult(await window.RoomService.getRoom(state.room.id));
+      await window.RoomService.finishRoomPlayer(state.room.id, state.user.id, {
+        current_index: Math.min(state.currentIndex, state.questions.length),
+        current_score: summary.current_score,
+        correct_count: summary.correct_count,
+        partial_count: summary.partial_count,
+        wrong_count: summary.wrong_count,
+        total_time: summary.total_time
+      });
+      const latestRoom = await window.RoomService.getRoom(state.room.id);
+      if (latestRoom?.status === "finished") renderRoomResult(latestRoom);
+      else renderRoomResult(latestRoom || state.room);
     } else {
       const updated = await window.RankedMatchService.submitResult(state.match, state.user, summary);
       const finalized = await window.RankedMatchService.finalizeIfReady(updated.id);
@@ -2711,11 +2975,17 @@ async function finishMultiplayerTest() {
 async function renderRoomResultById(roomId) {
   const room = await window.RoomService.getRoom(roomId);
   if (!room) return showView("rooms");
+  if (room.status === "cancelled") {
+    clearCurrentRoomSession();
+    return showView("rooms");
+  }
   renderRoomResult(room);
 }
 
 async function renderRoomResult(room) {
   activeRoomContext = { roomId: room.id, view: "result" };
+  const user = await window.UserRemoteService.getOrCreateUser(getNickname() || "익명");
+  saveCurrentRoomSession(room.id, user.id, "result");
   if (location.hash !== `#room-result:${room.id}`) location.hash = `room-result:${room.id}`;
   const players = await window.RoomService.getRoomPlayers(room.id);
   const sorted = [...players].sort((a, b) => window.RatingUtils.compareMultiplayerResults(a, b));
@@ -2739,11 +3009,24 @@ async function renderRoomResult(room) {
           </div>
         `).join("") || `<div class="empty">결과가 아직 없습니다.</div>`}
       </div>
-      <div class="actions"><button class="btn" data-go="rooms">방 목록으로</button></div>
+      <div class="actions"><button class="btn" data-go="rooms" data-clear-room-session>방 목록으로</button></div>
     </section>
   `;
   bindGoButtons();
-  window.RoomService.subscribeRoom(room.id, async () => {
+  document.querySelector("[data-clear-room-session]")?.addEventListener("click", clearCurrentRoomSession);
+  window.RoomService.subscribeRoom(room.id, {
+    onRoomChange: async () => {
+      if (activeRoomContext?.roomId !== room.id || activeRoomContext.view !== "result") return;
+      const latestRoom = await window.RoomService.getRoom(room.id);
+      if (latestRoom?.status === "cancelled") {
+        clearCurrentRoomSession();
+        showView("rooms");
+        return;
+      }
+      renderRoomResult(latestRoom);
+    }
+  });
+  window.RoomService.subscribeRoomPlayers(room.id, async () => {
     if (activeRoomContext?.roomId !== room.id || activeRoomContext.view !== "result") return;
     renderRoomResult(await window.RoomService.getRoom(room.id));
   });
@@ -3048,8 +3331,43 @@ function importLocalStorage(event) {
 
 function bindGoButtons() {
   document.querySelectorAll("[data-go]").forEach((button) => {
-    button.addEventListener("click", () => showView(button.dataset.go));
+    button.addEventListener("click", () => {
+      if (button.hasAttribute("data-clear-room-session")) clearCurrentRoomSession();
+      showView(button.dataset.go);
+    });
   });
+}
+
+async function restoreCurrentRoomSession() {
+  if (!isOnlineFeatureAvailable()) return false;
+  const currentHash = location.hash.replace("#", "") || "home";
+  if (currentHash.startsWith("room-")) return false;
+  const roomId = localStorage.getItem(STORAGE_KEYS.currentRoomId);
+  if (!roomId) return false;
+  try {
+    const room = await window.RoomService.getRoom(roomId);
+    if (!room || room.status === "cancelled") {
+      clearCurrentRoomSession();
+      if (room?.status === "cancelled") showNotice("이전에 참가하던 방이 취소되었습니다.", "info");
+      return false;
+    }
+    if (room.status === "waiting") {
+      renderRoomLobby(room);
+      return true;
+    }
+    if (room.status === "playing") {
+      renderRoomPlay(room);
+      return true;
+    }
+    if (room.status === "finished") {
+      renderRoomResult(room);
+      return true;
+    }
+  } catch (error) {
+    console.error("room session restore failed:", error);
+    clearCurrentRoomSession();
+  }
+  return false;
 }
 
 function init() {
@@ -3089,6 +3407,9 @@ function init() {
     console.error("remote user bootstrap failed:", error);
     if (isOnlineFeatureAvailable()) showNotice("Supabase 사용자 준비 중 오류가 발생했습니다.", "warning");
   });
+  setTimeout(() => {
+    restoreCurrentRoomSession().catch((error) => console.error("room session restore failed:", error));
+  }, 400);
   setTimeout(ensureNickname, 200);
 }
 

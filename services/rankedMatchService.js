@@ -58,11 +58,15 @@
     });
 
     if (match) {
+      const nextQuestionSet = Array.isArray(match.question_set) && match.question_set.length
+        ? match.question_set
+        : (settings.questionSet || []);
       const { data, error } = await supabase
         .from("ranked_matches")
         .update({
           player_b_id: user.id,
           status: "playing",
+          question_set: nextQuestionSet,
           started_at: new Date().toISOString()
         })
         .eq("id", match.id)
