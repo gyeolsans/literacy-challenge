@@ -1,5 +1,21 @@
-console.log("DEPLOY_VERSION", "full-supabase-repair-v1");
+console.log("DEPLOY_VERSION", "repair-v2-ai-room-ranked");
 console.log("APP_CONFIG_AT_START", window.APP_CONFIG);
+window.DEPLOY_VERSION = "repair-v2-ai-room-ranked";
+window.DEBUG_MODE = true;
+
+function debugLog(scope, message, data) {
+  if (!window.DEBUG_MODE) return;
+  console.log(`[${scope}] ${message}`, data ?? "");
+}
+
+function debugError(scope, message, error) {
+  window[`LAST_${String(scope).split(".")[0].toUpperCase()}_ERROR`] = error;
+  console.error(`[${scope}] ${message}`, error);
+  window.showNotice?.(`${scope}: ${message} - ${error?.message || error}`, "error", 0);
+}
+
+window.debugLog = debugLog;
+window.debugError = debugError;
 
 const app = document.querySelector("#app");
 const navButtons = [...document.querySelectorAll("[data-nav]")];
@@ -870,26 +886,34 @@ async function getStoredAIQuestions(settings = {}) {
 }
 
 async function generateAIQuestions(settings) {
+  debugLog("AI", "generateAIQuestions called", settings);
   if (isLocalFileMode()) {
-    showNotice("현재 로컬 파일로 실행 중이므로 Supabase Edge Function을 호출할 수 없습니다. 저장된 문제 또는 샘플 문제로 진행됩니다.", "warning");
-    return [];
+    const error = new Error("Local file mode cannot call Supabase Edge Functions. Use npm run dev or deployed URL.");
+    window.LAST_AI_ERROR = error;
+    debugError("AI.generateAIQuestions", "AI question generation failed", error);
+    throw error;
   }
 
-  if (!window.SupabaseService?.hasSupabaseConfig?.().ok) {
-    showNotice("Supabase 설정이 없어 AI 문제 생성 Edge Function을 호출할 수 없습니다. 저장된 문제 또는 샘플 문제로 진행합니다.", "warning");
-    return [];
+  const configCheck = window.SupabaseService?.hasSupabaseConfig?.();
+  debugLog("AI", "Supabase config check", configCheck);
+  if (!configCheck?.ok) {
+    const error = new Error(configCheck?.details?.join(" ") || "Supabase config is missing.");
+    window.LAST_AI_ERROR = error;
+    debugError("AI.generateAIQuestions", "Supabase config check failed", error);
+    throw error;
   }
 
   const buttons = [...document.querySelectorAll("[data-start-ai], [data-regenerate-ai], [data-start-ai-boost]")];
   const labels = buttons.map((button) => button.textContent);
   buttons.forEach((button) => {
     button.disabled = true;
-    button.textContent = "AI 문제 생성 중...";
+    button.textContent = "AI generating...";
   });
-  showNotice("AI 문제 생성 중...", "info", 0);
+  showNotice("Generating AI questions...", "info", 0);
 
   try {
     const supabase = window.SupabaseService.getSupabaseClient();
+    debugLog("AI", "Supabase client ready", Boolean(supabase));
     const { data, error } = await supabase.functions.invoke("generate-questions", {
       body: {
         difficulty: settings.difficulty,
@@ -899,21 +923,37 @@ async function generateAIQuestions(settings) {
         difficultyBoost: Boolean(settings.difficultyBoost)
       }
     });
+    debugLog("AI", "generate-questions response", { data, error });
     if (error) throw error;
-    const questions = sanitizeQuestions(Array.isArray(data.questions) ? data.questions : []);
-    if (!questions.length) throw new Error("AI가 사용할 수 있는 형식의 문제를 반환하지 않았습니다.");
+    if (!data?.ok && data?.error) throw new Error(String(data.error) + (data.detail ? " (" + data.detail + ")" : ""));
+    if (!Array.isArray(data?.questions)) throw new Error("Edge Function did not return data.questions array.");
+
+    const questions = data.questions
+      .map((question, index) => normalizeQuestion(question, "ai-live-" + Date.now() + "-" + index))
+      .filter(validateQuestion);
+    debugLog("AI", "validated questions", {
+      rawCount: data.questions.length,
+      validCount: questions.length,
+      firstQuestion: questions[0]
+    });
+    if (!questions.length) throw new Error("AI returned zero valid questions after validation.");
+
     saveAIQuestionsToLocal(questions);
-    await saveAIQuestionsToRemoteCache(questions, settings);
-    showNotice(`AI 문제 ${questions.length}개를 생성했습니다.`, "success");
+    try {
+      await saveAIQuestionsToRemoteCache(questions, settings);
+    } catch (cacheError) {
+      debugError("AI.cache", "questions_cache save failed; live AI questions will still be used", cacheError);
+    }
+    showNotice("Generated " + questions.length + " AI questions.", "success");
     return questions;
   } catch (error) {
-    console.error("AI question generation failed:", error);
-    showNotice("AI 문제 생성에 실패했습니다. 저장된 문제 또는 샘플 문제로 진행합니다.", "warning");
-    return [];
+    window.LAST_AI_ERROR = error;
+    debugError("AI.generateAIQuestions", "AI question generation failed", error);
+    throw error;
   } finally {
     buttons.forEach((button, index) => {
       button.disabled = false;
-      button.textContent = labels[index] || "AI가 만든 랜덤 문제로 시작";
+      button.textContent = labels[index] || "Start with AI questions";
     });
   }
 }
@@ -936,6 +976,48 @@ function getSavedAIQuestions() {
   return cleaned;
 }
 
+async function buildQuestionSet(settings, options = {}) {
+  const sourcePreference = options.sourcePreference || settings.questionSource || "ai";
+  debugLog("buildQuestionSet", "called", { settings, sourcePreference });
+
+  if (sourcePreference === "sample") {
+    const selection = selectQuestionsWithFallback({ questions: SAMPLE_QUESTIONS, settings });
+    return { source: "sample", questions: selection.selectedQuestions, message: selection.message };
+  }
+
+  if (sourcePreference === "ai") {
+    try {
+      const aiQuestions = await generateAIQuestions(settings);
+      if (aiQuestions?.length) {
+        const selection = selectQuestionsWithFallback({ questions: aiQuestions, settings });
+        return { source: "ai-live", questions: selection.selectedQuestions, message: selection.message };
+      }
+      throw new Error("AI generation returned an empty question list.");
+    } catch (error) {
+      window.LAST_AI_ERROR = error;
+      debugError("buildQuestionSet", "AI generation failed", error);
+      showNotice("AI generation failed: " + (error?.message || error), "error", 0);
+    }
+  }
+
+  const savedAI = sourcePreference === "sample" ? [] : await getStoredAIQuestions(settings);
+  if (savedAI?.length) {
+    const selection = selectQuestionsWithFallback({ questions: savedAI, settings });
+    showNotice("Falling back to saved AI questions.", "warning", 0);
+    return { source: "ai-saved", questions: selection.selectedQuestions, message: selection.message };
+  }
+
+  const selection = selectQuestionsWithFallback({ questions: SAMPLE_QUESTIONS, settings });
+  showNotice("Falling back to sample questions.", sourcePreference === "ai" ? "warning" : "info", sourcePreference === "ai" ? 0 : 5200);
+  return { source: "sample", questions: selection.selectedQuestions, message: selection.message };
+}
+
+function loadSavedAIQuestions() {
+  return getSavedAIQuestions();
+}
+
+window.buildQuestionSet = buildQuestionSet;
+
 function getSettingsFromForm() {
   const selectedTypes = [...document.querySelectorAll("input[name='type']:checked")].map((input) => input.value);
   return {
@@ -951,13 +1033,14 @@ function getSettingsFromForm() {
 
 async function startTest(sourceMode = "ai", difficultyBoostOverride = false) {
   try {
+    debugLog("TEST", "startTest called", { sourceMode, difficultyBoostOverride });
     if (!ensureNickname()) return;
     const existing = loadCurrentTest();
     if (existing) {
-      const startFresh = confirm("진행 중인 테스트가 있습니다.\n확인을 누르면 새 테스트를 시작하고, 취소를 누르면 이어서 풉니다.");
+      const startFresh = confirm("A test is already in progress. Start a new test?");
       if (!startFresh) {
         testState = existing;
-        showNotice("진행 중인 테스트를 복구했습니다.", "info");
+        showNotice("Restored the in-progress test.", "info");
         showView("test");
         return;
       }
@@ -967,58 +1050,30 @@ async function startTest(sourceMode = "ai", difficultyBoostOverride = false) {
     const settings = getSettingsFromForm();
     if (difficultyBoostOverride) settings.difficultyBoost = true;
     const mode = typeof sourceMode === "boolean" ? (sourceMode ? "ai" : "saved") : sourceMode;
-    let generatedAIQuestions = [];
+    const sourcePreference = mode === "sample" ? "sample" : mode === "saved" ? "saved" : "ai";
+    const built = await buildQuestionSet(settings, { sourcePreference });
+    const selectedQuestions = sanitizeQuestions(built.questions);
+    const source = built.source;
 
-    if (mode === "ai" && !isLocalFileMode()) {
-      generatedAIQuestions = await generateAIQuestions(settings);
-    } else if (mode === "ai" && isLocalFileMode()) {
-      showNotice("현재 로컬 파일로 실행 중이므로 Supabase Edge Function을 호출할 수 없습니다. 저장된 문제 또는 샘플 문제로 진행됩니다.", "warning");
-    }
+    debugLog("TEST", "selected question source", {
+      source,
+      count: selectedQuestions.length,
+      firstQuestion: selectedQuestions[0]
+    });
 
-    const savedAIQuestions = mode === "sample" ? [] : await getStoredAIQuestions(settings);
-    const sampleQuestions = sanitizeQuestions(SAMPLE_QUESTIONS);
-    const combinedPool = mode === "sample"
-      ? sampleQuestions
-      : mergeQuestionPools([
-        generatedAIQuestions,
-        savedAIQuestions,
-        sampleQuestions
-      ]);
-
-    if (mode === "sample") {
-      showNotice("샘플 문제로 테스트를 시작합니다.", "info");
-    } else if (!generatedAIQuestions.length && savedAIQuestions.length) {
-      showNotice("저장된 AI 문제와 샘플 문제를 함께 사용해 테스트를 시작합니다.", "info");
-    } else if (!generatedAIQuestions.length && !savedAIQuestions.length && sampleQuestions.length) {
-      showNotice("샘플 문제로 테스트를 시작합니다.", "info");
-    } else if (generatedAIQuestions.length) {
-      showNotice("AI 생성 문제를 우선 사용하고 부족하면 저장된 문제와 샘플 문제로 보완합니다.", "success");
-    }
-
-    const selection = selectQuestionsWithFallback({ questions: combinedPool, settings });
-    const selectedQuestions = selection.selectedQuestions;
-    if (selection.message) {
-      showNotice(selection.message, selection.shortage ? "warning" : "info");
-    }
-
-    console.log("테스트 설정:", settings);
-    console.log("전체 문제 수:", combinedPool.length);
-    console.log("선택된 문제 수:", selectedQuestions.length);
-    console.log("선택된 문제:", selectedQuestions.map((q) => q.id));
-
+    if (built.message) showNotice(built.message, "warning");
     if (!selectedQuestions.length) {
-      showNotice("사용 가능한 문제가 없습니다. 설정을 변경하거나 AI 문제를 다시 생성해 주세요.", "error", 0);
+      showNotice("No usable questions are available. Check the AI error and settings.", "error", 0);
       return;
     }
-
-    if (selectedQuestions.length < Number(settings.count || 5)) {
-      showNotice(`요청한 ${settings.count}문제 중 ${selectedQuestions.length}문제만 출제됩니다. 저장된 문제나 샘플 문제를 추가해 주세요.`, "warning");
-    }
+    if (mode === "ai" && source === "ai-live") showNotice("Starting with live AI questions.", "success");
+    if (mode === "ai" && source !== "ai-live") showNotice("Live AI generation failed. Current source: " + source, "warning", 0);
+    if (mode === "sample") showNotice("Starting with sample questions.", "info");
 
     testState = {
-      id: `test-${Date.now()}`,
+      id: "test-" + Date.now(),
       nickname: getNickname(),
-      settings,
+      settings: { ...settings, questionSource: source },
       questions: selectedQuestions,
       currentIndex: 0,
       answers: [],
@@ -1034,8 +1089,8 @@ async function startTest(sourceMode = "ai", difficultyBoostOverride = false) {
     saveCurrentTest();
     showView("test");
   } catch (error) {
-    console.error("startTest failed:", error);
-    showNotice("테스트를 시작하는 중 오류가 발생했습니다. 저장된 문제나 샘플 문제로 다시 시도해 주세요.", "error");
+    window.LAST_TEST_ERROR = error;
+    debugError("TEST.startTest", "test start failed", error);
   }
 }
 
@@ -1105,17 +1160,14 @@ function buildResultFromDetails(base, details) {
 }
 
 async function getQuestionSetForMultiplayer(settings) {
-  const source = settings.questionSource || "ai";
-  const generatedAIQuestions = source === "ai" ? await generateAIQuestions(settings) : [];
-  const savedAIQuestions = source === "sample" ? [] : await getStoredAIQuestions(settings);
-  const sampleQuestions = sanitizeQuestions(SAMPLE_QUESTIONS);
-  const questionSet = prepareTestQuestions({
-    questions: source === "sample"
-      ? sampleQuestions
-      : mergeQuestionPools([generatedAIQuestions, savedAIQuestions, sampleQuestions]),
-    settings
+  debugLog("buildQuestionSet", "multiplayer question set requested", settings);
+  const built = await buildQuestionSet(settings, { sourcePreference: settings.questionSource || "ai" });
+  debugLog("buildQuestionSet", "multiplayer question source", {
+    source: built.source,
+    count: built.questions.length,
+    firstQuestion: built.questions[0]
   });
-  return sanitizeQuestions(questionSet);
+  return sanitizeQuestions(built.questions);
 }
 
 function createMultiplayerState({ mode, room = null, match = null, user, profile = null }) {
@@ -1249,6 +1301,11 @@ async function updateRoomProgressPanel(roomId, totalQuestions) {
 
 async function updateRoomLobbyPanels(room, user) {
   if (activeRoomContext?.roomId !== room.id || activeRoomContext.view !== "lobby") return;
+  const latestRoom = await window.RoomService.getRoom(room.id);
+  if (!latestRoom || latestRoom.status !== "waiting") {
+    await handleRoomRealtimeStatus(room.id, user);
+    return;
+  }
   const players = await window.RoomService.getRoomPlayers(room.id);
   const profiles = await window.RankedMatchService?.getRankingProfiles?.().catch(() => []);
   const decoratedProfiles = window.RatingUtils.decorateProfilesWithPercentTiers(profiles || []);
@@ -1257,8 +1314,8 @@ async function updateRoomLobbyPanels(room, user) {
   const list = document.querySelector("#roomPlayersList");
   if (list) list.innerHTML = roomPlayersHtml(players, profileByUserId);
   const actions = document.querySelector("#roomLobbyActions");
-  if (actions) actions.innerHTML = roomLobbyActionsHtml(room, players, user, me);
-  bindRoomLobbyDynamicActions(room, user);
+  if (actions) actions.innerHTML = roomLobbyActionsHtml(latestRoom, players, user, me);
+  bindRoomLobbyDynamicActions(latestRoom, user);
 }
 
 async function handleRoomRealtimeStatus(roomId, user) {
@@ -1289,24 +1346,27 @@ async function handleRoomRealtimeStatus(roomId, user) {
 }
 
 function bindRoomLobbyDynamicActions(room, user) {
-  document.querySelector("[data-toggle-ready]")?.addEventListener("click", async (event) => {
+  document.querySelector("[data-toggle-ready]")?.addEventListener("click", async () => {
     try {
-      await window.RoomService.setReady(room.id, user.id, event.currentTarget.dataset.toggleReady === "true");
+      debugLog("room.toggleReady", "button clicked", { roomId: room.id, userId: user.id });
+      await window.RoomService.toggleReady(room.id, user.id);
+      await updateRoomLobbyPanels(room, user);
     } catch (error) {
-      console.error("ready update failed:", error);
-      showNotice(`준비 상태 변경 실패: ${friendlyOnlineError(error)}`, "error", 0);
+      window.LAST_ROOM_ERROR = error;
+      debugError("room.toggleReady", "ready update failed", error);
     }
   });
   document.querySelector("[data-start-room-game]")?.addEventListener("click", async () => {
     if (isStartingRoomGame) return;
     try {
       isStartingRoomGame = true;
+      debugLog("room.startRoomGame", "button clicked", { roomId: room.id, userId: user.id });
       const startedRoom = await window.RoomService.startRoom(room.id, user.id);
       saveCurrentRoomSession(room.id, user.id, "playing");
       renderRoomPlay(startedRoom);
     } catch (error) {
-      console.error("room start failed:", error);
-      showNotice(`방 시작 실패: ${friendlyOnlineError(error)}`, "error", 0);
+      window.LAST_ROOM_ERROR = error;
+      debugError("room.startRoomGame", "room start failed", error);
     } finally {
       isStartingRoomGame = false;
     }
@@ -3255,12 +3315,13 @@ function diagnosticsPanelHtml() {
     <div class="card">
       <div class="row between">
         <h3>Supabase diagnostics</h3>
-        <span class="badge info">full-supabase-repair-v1</span>
+        <span class="badge info">repair-v2-ai-room-ranked</span>
       </div>
       <div class="actions" style="margin-top:12px">
         <button class="btn" data-diagnostics-action="supabase">Supabase connection</button>
         <button class="btn" data-diagnostics-action="realtime">Realtime channel</button>
-        <button class="btn" data-diagnostics-action="ai">AI Edge Function</button>
+        <button class="btn" data-diagnostics-action="ai">AI Edge Function 테스트</button>
+        <button class="btn" data-diagnostics-action="checklist">Checklist</button>
         <button class="btn" data-diagnostics-action="rooms">Refresh rooms</button>
         <button class="btn" data-diagnostics-action="cleanup">Cleanup stale rooms</button>
         <button class="btn" data-diagnostics-action="storage">localStorage state</button>
@@ -3283,7 +3344,7 @@ function getLocalStorageDiagnostics() {
     snapshot[name] = safeParse(localStorage.getItem(key), localStorage.getItem(key));
   });
   return {
-    version: "full-supabase-repair-v1",
+    version: "repair-v2-ai-room-ranked",
     hash: location.hash,
     nickname: getNickname(),
     supabaseConfigured: window.SupabaseService?.hasSupabaseConfig?.() || null,
@@ -3326,11 +3387,39 @@ async function runDiagnosticsAction(action) {
         difficulty: "easy",
         count: 1,
         includeShortAnswer: false,
-        selectedTypes: ["main_idea"]
+        selectedTypes: ["main_idea"],
+        difficultyBoost: false
       }
     });
-    if (error) throw error;
-    return { action, returnedCount: data?.returnedCount || data?.questions?.length || 0, data };
+    const first = Array.isArray(data?.questions) ? data.questions[0] : null;
+    return {
+      action,
+      success: !error && data?.ok !== false,
+      errorMessage: error?.message || null,
+      dataOk: data?.ok ?? null,
+      dataError: data?.error ?? null,
+      dataDetail: data?.detail ?? null,
+      questionsLength: data?.questions?.length || 0,
+      firstQuestion: first ? { passage: first.passage, question: first.question } : null,
+      raw: { data, error }
+    };
+  }
+  if (action === "checklist") {
+    const supabase = window.SupabaseService.getSupabaseClient();
+    const checks = {
+      deployVersion: window.DEPLOY_VERSION,
+      supabaseConfigLoaded: window.SupabaseService?.hasSupabaseConfig?.()?.ok || false,
+      currentUserId: window.UserRemoteService?.getAnonymousUserId?.() || null,
+      currentRoomId: localStorage.getItem(STORAGE_KEYS.currentRoomId),
+      lastAIError: window.LAST_AI_ERROR?.message || String(window.LAST_AI_ERROR || ""),
+      lastRoomError: window.LAST_ROOM_ERROR?.message || String(window.LAST_ROOM_ERROR || ""),
+      lastRankedError: window.LAST_RANKED_ERROR?.message || String(window.LAST_RANKED_ERROR || "")
+    };
+    for (const table of ["rooms", "room_players", "ranked_matches"]) {
+      const { error } = await supabase.from(table).select("*").limit(1);
+      checks[`${table}Select`] = error ? `failed: ${error.message}` : "ok";
+    }
+    return { action, checks };
   }
   if (action === "rooms") {
     const rooms = await window.RoomService.getOpenRooms();

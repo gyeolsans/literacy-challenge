@@ -42,7 +42,7 @@ create table if not exists public.room_players (
   correct_count integer default 0,
   partial_count integer default 0,
   wrong_count integer default 0,
-  total_time integer default 0,
+  total_time numeric default 0,
   status text check (status in ('joined', 'ready', 'playing', 'finished', 'left')) default 'joined',
   joined_at timestamp with time zone default now(),
   updated_at timestamp with time zone default now(),
@@ -176,6 +176,7 @@ alter table public.rooms add column if not exists updated_at timestamp with time
 alter table public.rooms add column if not exists cancelled_at timestamp with time zone null;
 
 alter table public.room_players add column if not exists updated_at timestamp with time zone default now();
+alter table public.room_players alter column total_time type numeric using total_time::numeric;
 
 alter table public.ranking_profiles add column if not exists ranked_games integer default 0;
 alter table public.ranking_profiles add column if not exists percentile numeric null;
@@ -360,3 +361,24 @@ for each row execute function public.set_updated_at();
 
 -- Development policies above intentionally allow anon read/write for the prototype.
 -- Replace them with auth.uid() ownership checks before production launch.
+
+-- Realtime publication for room and ranked-match UI updates.
+-- Supabase projects usually include the supabase_realtime publication already.
+-- If a table is already in the publication, duplicate_object is ignored.
+do $$
+begin
+  alter publication supabase_realtime add table public.rooms;
+exception when duplicate_object then null;
+end $$;
+
+do $$
+begin
+  alter publication supabase_realtime add table public.room_players;
+exception when duplicate_object then null;
+end $$;
+
+do $$
+begin
+  alter publication supabase_realtime add table public.ranked_matches;
+exception when duplicate_object then null;
+end $$;

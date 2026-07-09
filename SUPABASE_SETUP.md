@@ -64,3 +64,15 @@ npm run dev
 ```powershell
 $env:PORT=3001; npm run dev
 ```
+
+## 6. Realtime 설정 확인
+
+대결 방과 랭킹전 화면 자동 이동은 Supabase Realtime에 의존합니다.
+
+Supabase 콘솔에서 `Database > Replication` 또는 `Realtime` 설정을 열고 아래 테이블이 Realtime 대상인지 확인하세요.
+
+- `rooms`
+- `room_players`
+- `ranked_matches`
+
+SQL로 직접 추가해야 하는 경우 `supabase-schema.sql` 맨 아래의 `supabase_realtime` publication 등록 블록을 실행하세요. 이미 등록된 테이블은 중복 오류를 무시하도록 작성되어 있습니다.
