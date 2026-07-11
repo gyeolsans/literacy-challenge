@@ -46,7 +46,7 @@ supabase functions serve generate-questions --env-file .env.local
 
 ## 5. Vercel 배포 및 캐시 확인
 
-현재 배포 버전 표식은 `repair-v2-ai-room-ranked`입니다.
+현재 배포 버전 표식은 `auth-bot-ai-fix-v1`입니다.
 
 ```bash
 git status
@@ -58,11 +58,11 @@ git push
 배포 후 브라우저 콘솔에서 다음 로그를 확인합니다.
 
 ```text
-DEPLOY_VERSION repair-v2-ai-room-ranked
+DEPLOY_VERSION auth-bot-ai-fix-v1
 APP_CONFIG_AT_START ...
 ```
 
-[index.html](./index.html)은 로컬 스크립트에 `?v=repair-v2-ai-room-ranked` 쿼리를 붙여 Vercel/브라우저 캐시가 오래된 `script.js`를 잡는 일을 줄입니다.
+[index.html](./index.html)은 로컬 스크립트에 `?v=auth-bot-ai-fix-v1` 쿼리를 붙여 Vercel/브라우저 캐시가 오래된 `script.js`를 잡는 일을 줄입니다.
 
 ## 6. 앱에서 진단하기
 

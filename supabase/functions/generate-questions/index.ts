@@ -54,11 +54,23 @@ function jsonResponse(body: Record<string, unknown>, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: jsonHeaders });
 }
 
-function errorResponse(error: string, detail: unknown, status = 500) {
+function serializeDetail(detail: unknown) {
+  if (detail instanceof Error) {
+    return {
+      name: detail.name,
+      message: detail.message,
+      stack: detail.stack
+    };
+  }
+  if (detail && typeof detail === "object") return detail;
+  return String(detail || "");
+}
+
+function errorResponse(error: string, detail: unknown = "", status = 200) {
   return jsonResponse({
     ok: false,
     error,
-    detail: String((detail as Error)?.message || detail || error)
+    detail: serializeDetail(detail || error)
   }, status);
 }
 
@@ -131,11 +143,28 @@ function extractJson(text: string) {
   if (!trimmed) throw new Error("OpenAI response text is empty.");
   try {
     return JSON.parse(trimmed);
-  } catch {
+  } catch (directError) {
     const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
     const candidate = fenced?.[1] || trimmed.match(/\{[\s\S]*\}/)?.[0];
-    if (!candidate) throw new Error("Could not find a JSON object in the OpenAI response.");
-    return JSON.parse(candidate);
+    if (!candidate) {
+      const error = new Error("Could not find a JSON object in the OpenAI response.");
+      (error as Error & { detail?: Record<string, unknown> }).detail = {
+        directParseError: (directError as Error)?.message || String(directError),
+        responsePreview: trimmed.slice(0, 2000)
+      };
+      throw error;
+    }
+    try {
+      return JSON.parse(candidate);
+    } catch (candidateError) {
+      const error = new Error("Could not parse JSON from the OpenAI response.");
+      (error as Error & { detail?: Record<string, unknown> }).detail = {
+        directParseError: (directError as Error)?.message || String(directError),
+        candidateParseError: (candidateError as Error)?.message || String(candidateError),
+        responsePreview: trimmed.slice(0, 2000)
+      };
+      throw error;
+    }
   }
 }
 
@@ -188,7 +217,7 @@ Deno.serve(async (req) => {
     const settings = normalizeSettings(body);
     const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
     if (!OPENAI_API_KEY) {
-      return errorResponse("OPENAI_API_KEY is not set in Supabase Edge Function Secrets.", "Missing OPENAI_API_KEY", 500);
+      return errorResponse("OPENAI_API_KEY is not set in Supabase Edge Function Secrets.", "Run: supabase secrets set OPENAI_API_KEY=...");
     }
 
     console.log("generate-questions request", {
@@ -215,12 +244,22 @@ Deno.serve(async (req) => {
     const payload = await openAiResponse.json().catch((error) => ({ parseError: String(error) }));
     if (!openAiResponse.ok) {
       console.error("OpenAI API error", payload);
-      return errorResponse("OpenAI API call failed.", (payload as { error?: { message?: string } })?.error?.message || JSON.stringify(payload), openAiResponse.status);
+      return errorResponse("OpenAI API call failed.", payload);
     }
 
     const rawText = extractOutputText(payload as Record<string, unknown>);
     console.log("OpenAI raw response preview", rawText.slice(0, 1200));
-    const parsed = extractJson(rawText);
+    let parsed: { questions?: Question[] };
+    try {
+      parsed = extractJson(rawText) as { questions?: Question[] };
+    } catch (parseError) {
+      const detail = (parseError as Error & { detail?: Record<string, unknown> }).detail || {
+        message: (parseError as Error)?.message || String(parseError),
+        responsePreview: rawText.slice(0, 2000)
+      };
+      console.error("OpenAI JSON parse failed", detail);
+      return errorResponse("OpenAI response JSON parsing failed.", detail);
+    }
     const rawQuestions = Array.isArray(parsed?.questions) ? parsed.questions : [];
     const questions = rawQuestions
       .map((q: Question, index: number) => normalizeQuestion(q, settings, index))
@@ -231,7 +270,7 @@ Deno.serve(async (req) => {
       return errorResponse("OpenAI returned zero valid questions.", {
         rawQuestionCount: rawQuestions.length,
         responsePreview: rawText.slice(0, 1200)
-      }, 502);
+      });
     }
 
     return jsonResponse({
@@ -243,6 +282,6 @@ Deno.serve(async (req) => {
     });
   } catch (error) {
     console.error("generate-questions failed", error);
-    return errorResponse("generate-questions failed.", error, 500);
+    return errorResponse("generate-questions failed.", error);
   }
 });

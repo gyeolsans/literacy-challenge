@@ -14,7 +14,8 @@
   }
 
   function buildReplayPayload(summary, options = {}) {
-    const userId = window.UserRemoteService?.getAnonymousUserId?.() || crypto.randomUUID();
+    const authUser = window.UserRemoteService?.getCurrentAuthUser?.();
+    const userId = authUser?.id || window.UserRemoteService?.getAnonymousUserId?.() || crypto.randomUUID();
     return {
       id: options.id || crypto.randomUUID(),
       user_id: userId,
@@ -102,7 +103,7 @@
   }
 
   async function getMyReplays() {
-    const userId = window.UserRemoteService?.getAnonymousUserId?.();
+    const userId = window.UserRemoteService?.getCurrentAuthUser?.()?.id || window.UserRemoteService?.getAnonymousUserId?.();
     if (window.SupabaseService?.isConfigured() && userId) {
       return window.SupabaseService.request(`replays?user_id=eq.${userId}&order=created_at.desc`);
     }
@@ -117,7 +118,7 @@
   }
 
   async function getReplayById(replayId) {
-    const userId = window.UserRemoteService?.getAnonymousUserId?.();
+    const userId = window.UserRemoteService?.getCurrentAuthUser?.()?.id || window.UserRemoteService?.getAnonymousUserId?.();
     if (window.SupabaseService?.isConfigured()) {
       const rows = await window.SupabaseService.request(`replays?id=eq.${replayId}&limit=1`);
       const replay = rows?.[0];

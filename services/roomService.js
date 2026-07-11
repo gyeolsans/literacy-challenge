@@ -170,7 +170,7 @@
       if (typeof room === "string") {
         const foundRoom = await findRoomByCode(room);
         if (!foundRoom) throw new Error("Waiting room was not found.");
-        const remoteUser = user || await window.UserRemoteService.getOrCreateUser("anonymous");
+        const remoteUser = user || await window.UserRemoteService.requireAuthUser();
         return joinRoom(foundRoom, remoteUser, false);
       }
       const supabase = ensureOnline();
@@ -222,7 +222,7 @@
     log("room.joinRoomById", "called", { roomId, user });
     const room = await getRoom(roomId);
     if (!room) throw new Error("Room was not found.");
-    const remoteUser = user || await window.UserRemoteService.getOrCreateUser("anonymous");
+    const remoteUser = user || await window.UserRemoteService.requireAuthUser();
     return joinRoom(room, remoteUser, false);
   }
 

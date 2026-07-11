@@ -2,7 +2,11 @@ create extension if not exists "pgcrypto";
 
 create table if not exists public.users (
   id uuid primary key default gen_random_uuid(),
+  user_id uuid unique,
   nickname text not null,
+  email text null,
+  avatar_url text null,
+  provider text null,
   auth_user_id uuid null,
   created_at timestamp with time zone default now(),
   updated_at timestamp with time zone default now()
@@ -97,6 +101,11 @@ create table if not exists public.ranked_matches (
   player_b_result jsonb,
   player1_result jsonb,
   player2_result jsonb,
+  is_bot_match boolean default false,
+  bot_user_id text,
+  bot_nickname text,
+  bot_profile jsonb,
+  bot_result jsonb,
   rating_delta_a integer default 0,
   rating_delta_b integer default 0,
   rating_delta_player1 integer default 0,
@@ -175,6 +184,12 @@ alter table public.rooms add column if not exists max_players integer default 4;
 alter table public.rooms add column if not exists updated_at timestamp with time zone default now();
 alter table public.rooms add column if not exists cancelled_at timestamp with time zone null;
 
+alter table public.users add column if not exists user_id uuid unique;
+alter table public.users add column if not exists email text null;
+alter table public.users add column if not exists avatar_url text null;
+alter table public.users add column if not exists provider text null;
+alter table public.users add column if not exists auth_user_id uuid null;
+
 alter table public.room_players add column if not exists updated_at timestamp with time zone default now();
 alter table public.room_players alter column total_time type numeric using total_time::numeric;
 
@@ -190,6 +205,11 @@ alter table public.ranked_matches add column if not exists player1_nickname text
 alter table public.ranked_matches add column if not exists player2_nickname text;
 alter table public.ranked_matches add column if not exists player1_result jsonb;
 alter table public.ranked_matches add column if not exists player2_result jsonb;
+alter table public.ranked_matches add column if not exists is_bot_match boolean default false;
+alter table public.ranked_matches add column if not exists bot_user_id text;
+alter table public.ranked_matches add column if not exists bot_nickname text;
+alter table public.ranked_matches add column if not exists bot_profile jsonb;
+alter table public.ranked_matches add column if not exists bot_result jsonb;
 alter table public.ranked_matches add column if not exists rating_delta_player1 integer default 0;
 alter table public.ranked_matches add column if not exists rating_delta_player2 integer default 0;
 alter table public.ranked_matches add column if not exists updated_at timestamp with time zone default now();
@@ -234,6 +254,9 @@ drop policy if exists "users readable for anon development" on public.users;
 drop policy if exists "users insert own anonymous id" on public.users;
 drop policy if exists "users update own row development" on public.users;
 drop policy if exists "users delete development" on public.users;
+drop policy if exists "authenticated users insert own profile development" on public.users;
+drop policy if exists "authenticated users update own profile development" on public.users;
+drop policy if exists "authenticated users delete own profile development" on public.users;
 create policy "users readable for anon development" on public.users for select using (true);
 create policy "users insert own anonymous id" on public.users for insert with check (true);
 create policy "users update own row development" on public.users for update using (true) with check (true);
@@ -243,6 +266,9 @@ drop policy if exists "ranking profiles public read" on public.ranking_profiles;
 drop policy if exists "ranking profile insert development" on public.ranking_profiles;
 drop policy if exists "ranking profile update owner development" on public.ranking_profiles;
 drop policy if exists "ranking profile delete development" on public.ranking_profiles;
+drop policy if exists "ranking profile insert authenticated development" on public.ranking_profiles;
+drop policy if exists "ranking profile update authenticated development" on public.ranking_profiles;
+drop policy if exists "ranking profile delete authenticated development" on public.ranking_profiles;
 create policy "ranking profiles public read" on public.ranking_profiles for select using (true);
 create policy "ranking profile insert development" on public.ranking_profiles for insert with check (true);
 create policy "ranking profile update owner development" on public.ranking_profiles for update using (true) with check (true);
@@ -252,6 +278,9 @@ drop policy if exists "room participant read rooms development" on public.rooms;
 drop policy if exists "room create development" on public.rooms;
 drop policy if exists "room update participants development" on public.rooms;
 drop policy if exists "room delete development" on public.rooms;
+drop policy if exists "rooms insert authenticated development" on public.rooms;
+drop policy if exists "rooms update authenticated development" on public.rooms;
+drop policy if exists "rooms delete authenticated development" on public.rooms;
 create policy "room participant read rooms development" on public.rooms for select using (true);
 create policy "room create development" on public.rooms for insert with check (true);
 create policy "room update participants development" on public.rooms for update using (true) with check (true);
@@ -261,6 +290,9 @@ drop policy if exists "room players read development" on public.room_players;
 drop policy if exists "room players insert development" on public.room_players;
 drop policy if exists "room players update own development" on public.room_players;
 drop policy if exists "room players delete development" on public.room_players;
+drop policy if exists "room players insert authenticated development" on public.room_players;
+drop policy if exists "room players update authenticated development" on public.room_players;
+drop policy if exists "room players delete authenticated development" on public.room_players;
 create policy "room players read development" on public.room_players for select using (true);
 create policy "room players insert development" on public.room_players for insert with check (true);
 create policy "room players update own development" on public.room_players for update using (true) with check (true);
@@ -279,6 +311,9 @@ drop policy if exists "ranked matches read participants development" on public.r
 drop policy if exists "ranked matches insert development" on public.ranked_matches;
 drop policy if exists "ranked matches update participants development" on public.ranked_matches;
 drop policy if exists "ranked matches delete development" on public.ranked_matches;
+drop policy if exists "ranked matches insert authenticated development" on public.ranked_matches;
+drop policy if exists "ranked matches update authenticated development" on public.ranked_matches;
+drop policy if exists "ranked matches delete authenticated development" on public.ranked_matches;
 create policy "ranked matches read participants development" on public.ranked_matches for select using (true);
 create policy "ranked matches insert development" on public.ranked_matches for insert with check (true);
 create policy "ranked matches update participants development" on public.ranked_matches for update using (true) with check (true);
@@ -361,6 +396,49 @@ for each row execute function public.set_updated_at();
 
 -- Development policies above intentionally allow anon read/write for the prototype.
 -- Replace them with auth.uid() ownership checks before production launch.
+
+-- Auth-based development policy override.
+-- Nickname-only anon users must not create ranking profiles or online match rows.
+drop policy if exists "users insert own anonymous id" on public.users;
+drop policy if exists "users update own row development" on public.users;
+drop policy if exists "users delete development" on public.users;
+create policy "authenticated users insert own profile development" on public.users
+for insert to authenticated with check (id = auth.uid() or user_id = auth.uid());
+create policy "authenticated users update own profile development" on public.users
+for update to authenticated using (id = auth.uid() or user_id = auth.uid()) with check (id = auth.uid() or user_id = auth.uid());
+create policy "authenticated users delete own profile development" on public.users
+for delete to authenticated using (id = auth.uid() or user_id = auth.uid());
+
+drop policy if exists "ranking profile insert development" on public.ranking_profiles;
+drop policy if exists "ranking profile update owner development" on public.ranking_profiles;
+drop policy if exists "ranking profile delete development" on public.ranking_profiles;
+create policy "ranking profile insert authenticated development" on public.ranking_profiles
+for insert to authenticated with check (user_id = auth.uid());
+create policy "ranking profile update authenticated development" on public.ranking_profiles
+for update to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
+create policy "ranking profile delete authenticated development" on public.ranking_profiles
+for delete to authenticated using (user_id = auth.uid());
+
+drop policy if exists "room create development" on public.rooms;
+drop policy if exists "room update participants development" on public.rooms;
+drop policy if exists "room delete development" on public.rooms;
+create policy "rooms insert authenticated development" on public.rooms for insert to authenticated with check (true);
+create policy "rooms update authenticated development" on public.rooms for update to authenticated using (true) with check (true);
+create policy "rooms delete authenticated development" on public.rooms for delete to authenticated using (true);
+
+drop policy if exists "room players insert development" on public.room_players;
+drop policy if exists "room players update own development" on public.room_players;
+drop policy if exists "room players delete development" on public.room_players;
+create policy "room players insert authenticated development" on public.room_players for insert to authenticated with check (user_id = auth.uid());
+create policy "room players update authenticated development" on public.room_players for update to authenticated using (true) with check (true);
+create policy "room players delete authenticated development" on public.room_players for delete to authenticated using (true);
+
+drop policy if exists "ranked matches insert development" on public.ranked_matches;
+drop policy if exists "ranked matches update participants development" on public.ranked_matches;
+drop policy if exists "ranked matches delete development" on public.ranked_matches;
+create policy "ranked matches insert authenticated development" on public.ranked_matches for insert to authenticated with check (player_a_id = auth.uid() or player1_user_id = auth.uid());
+create policy "ranked matches update authenticated development" on public.ranked_matches for update to authenticated using (true) with check (true);
+create policy "ranked matches delete authenticated development" on public.ranked_matches for delete to authenticated using (true);
 
 -- Realtime publication for room and ranked-match UI updates.
 -- Supabase projects usually include the supabase_realtime publication already.

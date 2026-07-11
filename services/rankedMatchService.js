@@ -31,7 +31,63 @@
   }
 
   function result2(match) {
-    return match?.player_b_result || match?.player2_result;
+    return match?.player_b_result || match?.player2_result || match?.bot_result;
+  }
+
+  function botProfileForRating(rating = 1000) {
+    const value = Number(rating || 1000);
+    const band = value >= 2200 ? "diamond" : value >= 1800 ? "platinum" : value >= 1400 ? "gold" : value >= 1000 ? "silver" : "bronze";
+    const ranges = {
+      bronze: [0.45, 0.60, 75],
+      silver: [0.55, 0.70, 65],
+      gold: [0.65, 0.78, 55],
+      platinum: [0.72, 0.84, 48],
+      diamond: [0.80, 0.92, 40]
+    };
+    const [minAccuracy, maxAccuracy, avgSeconds] = ranges[band];
+    return {
+      id: `bot_${band}_${Date.now()}`,
+      nickname: `${band[0].toUpperCase()}${band.slice(1)} AI Bot`,
+      rating: value,
+      band,
+      minAccuracy,
+      maxAccuracy,
+      avgSeconds
+    };
+  }
+
+  function generateBotResult(match) {
+    const humanSeed = result1(match) || {};
+    const rating = Number(humanSeed.rating || 1000);
+    const profile = match.bot_profile || botProfileForRating(rating);
+    const questionCount = Math.max(1, Number(match.question_count || match.question_set?.length || 5));
+    const accuracy = Number(profile.minAccuracy || 0.55) + Math.random() * (Number(profile.maxAccuracy || 0.72) - Number(profile.minAccuracy || 0.55));
+    let correct = Math.max(0, Math.min(questionCount, Math.round(questionCount * accuracy)));
+    const remaining = Math.max(0, questionCount - correct);
+    const partial = Math.min(remaining, Math.random() < 0.35 ? 1 : 0);
+    const wrong = Math.max(0, questionCount - correct - partial);
+    const avgSeconds = Number(profile.avgSeconds || 60);
+    const totalTime = Math.round(questionCount * (avgSeconds * (0.8 + Math.random() * 0.45)));
+    const currentScore = correct * 10 + partial * 5;
+    return {
+      user_id: profile.id,
+      nickname: profile.nickname,
+      rating,
+      correct_count: correct,
+      partial_count: partial,
+      wrong_count: wrong,
+      total_time: totalTime,
+      current_score: currentScore,
+      score: currentScore,
+      details: Array.from({ length: questionCount }, (_, index) => ({
+        index,
+        is_bot: true,
+        is_correct: index < correct,
+        is_partial: index >= correct && index < correct + partial,
+        elapsed: Math.max(10, Math.round(totalTime / questionCount))
+      })),
+      submitted_at: new Date().toISOString()
+    };
   }
 
   async function getMatch(matchId) {
@@ -170,6 +226,63 @@
     }
   }
 
+  async function startBotMatch(matchId) {
+    log("ranked.startBotMatch", "called", { matchId });
+    try {
+      const supabase = ensureOnline();
+      const match = await getMatch(matchId);
+      if (!match) throw new Error("Ranked match was not found.");
+      if (match.status !== "matching" || player2Id(match)) {
+        log("ranked.startBotMatch", "skipped because match changed", match);
+        return match;
+      }
+      const botProfile = botProfileForRating(Number(result1(match)?.rating || 1000));
+      const now = new Date().toISOString();
+      const { data, error } = await supabase
+        .from("ranked_matches")
+        .update({
+          status: "playing",
+          is_bot_match: true,
+          bot_user_id: botProfile.id,
+          bot_nickname: botProfile.nickname,
+          bot_profile: botProfile,
+          started_at: now,
+          updated_at: now
+        })
+        .eq("id", matchId)
+        .eq("status", "matching")
+        .is("player2_user_id", null)
+        .select()
+        .single();
+      if (error) throw Object.assign(error, { stage: "ranked_matches bot start update" });
+      log("ranked.startBotMatch", "started", data);
+      return data;
+    } catch (error) {
+      fail("ranked.startBotMatch", "failed", error);
+      throw error;
+    }
+  }
+
+  async function waitForHumanOrStartBot(matchId, options = {}) {
+    const waitMs = Number(options.waitMs || 10000);
+    log("ranked.waitForHumanOrStartBot", "waiting", { matchId, waitMs });
+    return new Promise((resolve) => {
+      setTimeout(async () => {
+        try {
+          const latest = await getMatch(matchId);
+          if (latest?.status === "matching" && !player2Id(latest)) {
+            resolve(await startBotMatch(matchId));
+          } else {
+            resolve(latest);
+          }
+        } catch (error) {
+          fail("ranked.waitForHumanOrStartBot", "failed", error);
+          resolve(null);
+        }
+      }, waitMs);
+    });
+  }
+
   async function submitResult(matchOrId, user, result) {
     const match = typeof matchOrId === "string" ? await getMatch(matchOrId) : matchOrId;
     log("ranked.finishRankedPlayer", "called", { matchId: match?.id, user, result });
@@ -230,7 +343,12 @@
     const supabase = ensureOnline();
     const { data, error } = await supabase.from("ranking_profiles").select("*").order("rating", { ascending: false });
     if (error) throw Object.assign(error, { stage: "ranking profiles select" });
-    return data || [];
+    const map = new Map();
+    for (const profile of data || []) {
+      if (!profile.user_id || Number(profile.ranked_games || 0) <= 0) continue;
+      if (!map.has(profile.user_id)) map.set(profile.user_id, profile);
+    }
+    return [...map.values()].sort((a, b) => Number(b.rating || 0) - Number(a.rating || 0));
   }
 
   async function recalculateAllTiers() {
@@ -256,7 +374,24 @@
     try {
       const match = await getMatch(matchId);
       const a = result1(match);
-      const b = result2(match);
+      let b = result2(match);
+      if (match?.is_bot_match && a?.details && !b?.details) {
+        b = generateBotResult(match);
+        const supabase = ensureOnline();
+        const { data: withBot, error: botError } = await supabase
+          .from("ranked_matches")
+          .update({
+            bot_result: b,
+            player_b_result: b,
+            player2_result: b,
+            updated_at: new Date().toISOString()
+          })
+          .eq("id", matchId)
+          .select()
+          .single();
+        if (botError) throw Object.assign(botError, { stage: "ranked_matches bot result update" });
+        return finalizeIfReady(withBot.id);
+      }
       if (!a?.details || !b?.details || match.status === "finished") return match;
 
       const comparison = window.RatingUtils.compareMultiplayerResults(a, b);
@@ -266,7 +401,7 @@
       const bGame = comparison > 0 ? 1 : comparison < 0 ? 0 : 0.5;
       const deltaA = window.RatingUtils.calculateRatingDelta(aRating, bRating, aGame);
       const deltaB = window.RatingUtils.calculateRatingDelta(bRating, aRating, bGame);
-      const winnerUserId = comparison < 0 ? player1Id(match) : comparison > 0 ? player2Id(match) : null;
+      const winnerUserId = comparison < 0 ? player1Id(match) : comparison > 0 ? (match.is_bot_match ? null : player2Id(match)) : null;
       const now = new Date().toISOString();
       const supabase = ensureOnline();
       const { data: finished, error } = await supabase
@@ -287,7 +422,7 @@
       if (error) throw Object.assign(error, { stage: "ranked_matches finish update" });
       await Promise.all([
         updateRankingProfile(player1Id(match), a, deltaA, aGame),
-        updateRankingProfile(player2Id(match), b, deltaB, bGame)
+        match.is_bot_match ? Promise.resolve(null) : updateRankingProfile(player2Id(match), b, deltaB, bGame)
       ]);
       await recalculateAllTiers();
       log("ranked.finalizeRankedMatchIfBothFinished", "finished", finished);
@@ -353,6 +488,9 @@
     getRankingProfiles,
     recalculateAllTiers,
     cancelMatch,
+    startBotMatch,
+    waitForHumanOrStartBot,
+    generateBotResult,
     subscribeRankedMatch,
     unsubscribeRankedMatch
   };
