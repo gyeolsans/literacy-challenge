@@ -1,6 +1,6 @@
-console.log("DEPLOY_VERSION", "ai-debug-v3");
+console.log("DEPLOY_VERSION", "supabase-ready-v1");
 console.log("APP_CONFIG_AT_START", window.APP_CONFIG);
-window.DEPLOY_VERSION = "ai-debug-v3";
+window.DEPLOY_VERSION = "supabase-ready-v1";
 window.DEBUG_MODE = true;
 
 function debugLog(scope, message, data) {
@@ -557,15 +557,47 @@ function getNickname() {
   return getStorage(STORAGE_KEYS.nickname, "");
 }
 
+function isSupabaseOnlineReady(diagnostics = window.SUPABASE_DIAGNOSTICS || window.SupabaseService?.getStatus?.()) {
+  if (window.SupabaseService?.isSupabaseOnlineReady) {
+    return window.SupabaseService.isSupabaseOnlineReady(diagnostics);
+  }
+  const requiredTables = [
+    "users",
+    "rooms",
+    "room_players",
+    "room_matches",
+    "ranking_profiles",
+    "ranked_matches",
+    "replays",
+    "replay_items",
+    "questions_cache"
+  ];
+  const details = Array.isArray(diagnostics?.details) ? diagnostics.details : [];
+  return Boolean(
+    window.supabase &&
+    window.APP_CONFIG?.SUPABASE_URL &&
+    window.APP_CONFIG?.SUPABASE_ANON_KEY &&
+    diagnostics?.ok === true &&
+    requiredTables.every((table) => details.includes(`${table} select OK`))
+  );
+}
+window.isSupabaseOnlineReady = isSupabaseOnlineReady;
+
 function isOnlineFeatureAvailable() {
-  return Boolean(window.SupabaseService?.hasSupabaseConfig?.().ok && window.location.protocol !== "file:");
+  if (window.location.protocol === "file:") return false;
+  return isSupabaseOnlineReady();
 }
 
 function onlineDisabledHtml() {
   if (window.location.protocol === "file:") {
     return `<div class="card notice-inline warning">현재 파일 직접 실행 모드입니다. 온라인 기능을 사용하려면 npm run dev 또는 Vercel 배포 주소로 접속하세요.</div>`;
   }
-  return `<div class="card notice-inline warning">온라인 대결 기능은 Supabase 설정 후 사용할 수 있습니다. 현재는 솔로 테스트와 로컬 리플레이만 사용할 수 있습니다.</div>`;
+  const diagnostics = window.SUPABASE_DIAGNOSTICS || window.SupabaseService?.getStatus?.();
+  if (!diagnostics || diagnostics.state === "unknown") {
+    return `<div class="card notice-inline info">Supabase 진단을 확인하는 중입니다.</div>`;
+  }
+  const details = Array.isArray(diagnostics.details) ? diagnostics.details.join(" ") : "";
+  return `<div class="card notice-inline warning"><strong>Supabase 진단 실패</strong>${details ? `<p>${escapeHtml(details)}</p>` : ""}</div>`;
 }
 
 function supabaseStatusHtml() {
@@ -580,13 +612,12 @@ async function ensureSupabaseReadyForAction(actionName = "온라인 기능") {
   if (window.location.protocol === "file:") {
     throw new Error("현재 파일 직접 실행 모드입니다. 온라인 기능을 사용하려면 npm run dev 또는 Vercel 배포 주소로 접속하세요.");
   }
-  const configCheck = window.SupabaseService?.hasSupabaseConfig?.();
-  if (!configCheck?.ok) {
-    throw new Error(configCheck?.details?.join(" ") || "Supabase 설정이 없습니다.");
-  }
-  const status = await window.SupabaseService.testSupabaseConnection();
-  if (status.state !== "connected") {
-    throw new Error(`${actionName}을 시작할 수 없습니다. ${status.details?.join(" ") || status.label}`);
+  if (isSupabaseOnlineReady()) return true;
+
+  const status = await window.SupabaseService?.checkSupabaseDiagnostics?.();
+  if (!isSupabaseOnlineReady(status)) {
+    const details = Array.isArray(status?.details) ? status.details.join(" ") : "";
+    throw new Error(`${actionName}을 시작할 수 없습니다. ${details || status?.label || "Supabase 진단에 실패했습니다."}`);
   }
   return true;
 }
@@ -2528,7 +2559,9 @@ function renderToday() {
 }
 
 function renderRooms() {
-  const configured = isOnlineFeatureAvailable() && window.UserRemoteService?.isLoggedIn?.();
+  const configured = isOnlineFeatureAvailable();
+  console.log("[ROOMS] Supabase diagnostics", window.SUPABASE_DIAGNOSTICS);
+  console.log("[ROOMS] SUPABASE_ONLINE_READY", window.SUPABASE_ONLINE_READY);
   app.innerHTML = `
     <section class="section">
       <div class="card">
@@ -2586,7 +2619,7 @@ function renderRooms() {
         secondsPerQuestion: 60,
         selectedTypes: Object.keys(TYPE_LABELS)
       };
-      const user = await window.UserRemoteService.requireAuthUser();
+      const user = await window.UserRemoteService.getOrCreateUser(getNickname() || "익명");
       const questionSet = await getQuestionSetForMultiplayer(settings);
       if (!questionSet.length) throw new Error("question_set 생성 실패: 출제 가능한 문제가 없습니다.");
       const { room, player } = await window.RoomService.createRoom(settings, user, questionSet);
@@ -2658,7 +2691,7 @@ async function joinRoomByCode(code, button = null) {
     }
     await ensureSupabaseReadyForAction("방 입장");
     if (!code) return showNotice("방 코드를 입력해 주세요.", "warning");
-    const user = await window.UserRemoteService.requireAuthUser();
+    const user = await window.UserRemoteService.getOrCreateUser(getNickname() || "익명");
     const room = await window.RoomService.findRoomByCode(code);
     if (!room) throw new Error("waiting 상태의 방을 찾을 수 없습니다.");
     const player = await window.RoomService.joinRoom(room, user, false);
@@ -2708,7 +2741,7 @@ async function renderRoomLobby(room, initialPlayers = []) {
     clearCurrentRoomSession();
     return showView("rooms");
   }
-  const user = await window.UserRemoteService.requireAuthUser();
+  const user = await window.UserRemoteService.getOrCreateUser(getNickname() || "익명");
   let players = await window.RoomService.getRoomPlayers(room.id);
   const profiles = await window.RankedMatchService?.getRankingProfiles?.().catch(() => []);
   const decoratedProfiles = window.RatingUtils.decorateProfilesWithPercentTiers(profiles || []);
@@ -2970,7 +3003,7 @@ async function renderRoomPlay(room) {
     showNotice("방장이 나가서 방이 취소되었습니다.", "warning", 0);
     return showView("rooms");
   }
-  const user = await window.UserRemoteService.requireAuthUser();
+  const user = await window.UserRemoteService.getOrCreateUser(getNickname() || "익명");
   activeRoomContext = { roomId: room.id, view: "play" };
   saveCurrentRoomSession(room.id, user.id, "playing");
   if (location.hash !== `#room-play:${room.id}`) location.hash = `room-play:${room.id}`;
@@ -3505,7 +3538,7 @@ function diagnosticsPanelHtml() {
     <div class="card">
       <div class="row between">
         <h3>Supabase diagnostics</h3>
-        <span class="badge info">ai-debug-v3</span>
+        <span class="badge info">supabase-ready-v1</span>
       </div>
       <div class="actions" style="margin-top:12px">
         <button class="btn" data-diagnostics-action="supabase">Supabase connection</button>
@@ -3575,7 +3608,7 @@ function getLocalStorageDiagnostics() {
     snapshot[name] = safeParse(localStorage.getItem(key), localStorage.getItem(key));
   });
   return {
-    version: window.DEPLOY_VERSION || "ai-debug-v3",
+    version: window.DEPLOY_VERSION || "supabase-ready-v1",
     hash: location.hash,
     nickname: getNickname(),
     supabaseConfigured: window.SupabaseService?.hasSupabaseConfig?.() || null,

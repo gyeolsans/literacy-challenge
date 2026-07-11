@@ -3,8 +3,21 @@
   let lastStatus = {
     state: "unknown",
     label: "Supabase 상태 확인 전",
-    details: []
+    details: [],
+    ok: false
   };
+
+  const REQUIRED_TABLES = [
+    "users",
+    "rooms",
+    "room_players",
+    "room_matches",
+    "ranking_profiles",
+    "ranked_matches",
+    "replays",
+    "replay_items",
+    "questions_cache"
+  ];
 
   function getConfig() {
     return window.APP_CONFIG || null;
@@ -95,8 +108,31 @@
     return hasSupabaseConfig().ok;
   }
 
-  function setStatus(state, label, details = []) {
-    lastStatus = { state, label, details };
+  function isSupabaseOnlineReady(diagnostics = window.SUPABASE_DIAGNOSTICS) {
+    const details = Array.isArray(diagnostics?.details) ? diagnostics.details : [];
+    const requiredTablesOk = REQUIRED_TABLES.every((table) => details.includes(`${table} select OK`));
+    return Boolean(
+      window.supabase &&
+      window.APP_CONFIG?.SUPABASE_URL &&
+      window.APP_CONFIG?.SUPABASE_ANON_KEY &&
+      diagnostics?.ok === true &&
+      requiredTablesOk
+    );
+  }
+
+  function setStatus(state, label, details = [], extra = {}) {
+    const ok = Boolean(extra.ok ?? state === "connected");
+    lastStatus = {
+      state,
+      label,
+      details,
+      ok,
+      requiredTables: REQUIRED_TABLES,
+      checkedAt: new Date().toISOString(),
+      ...extra
+    };
+    window.SUPABASE_DIAGNOSTICS = lastStatus;
+    window.SUPABASE_ONLINE_READY = isSupabaseOnlineReady(lastStatus);
     window.dispatchEvent(new CustomEvent("supabase-status-change", { detail: lastStatus }));
     return lastStatus;
   }
@@ -112,19 +148,8 @@
 
     try {
       const client = getSupabaseClient();
-      const tables = [
-        "users",
-        "rooms",
-        "room_players",
-        "room_matches",
-        "ranking_profiles",
-        "ranked_matches",
-        "replays",
-        "replay_items",
-        "questions_cache"
-      ];
       const details = [];
-      for (const table of tables) {
+      for (const table of REQUIRED_TABLES) {
         const { error } = await client.from(table).select("*").limit(1);
         if (error) {
           error.stage = `${table} select`;
@@ -132,7 +157,7 @@
         }
         details.push(`${table} select OK`);
       }
-      return setStatus("connected", "Supabase 연결됨", details);
+      return setStatus("connected", "Supabase 연결됨", details, { ok: true });
     } catch (error) {
       console.error("Supabase connection test failed:", error);
       const friendly = getFriendlyErrorMessage(error);
@@ -141,7 +166,7 @@
         : error.code === "42501"
           ? "rls-blocked"
           : "failed";
-      return setStatus(state, "Supabase 연결 테스트 실패", [friendly]);
+      return setStatus(state, "Supabase 연결 테스트 실패", [friendly], { ok: false, error: friendly });
     }
   }
 
@@ -235,6 +260,8 @@
     ensureSupabaseClient,
     checkSupabaseDiagnostics,
     testSupabaseConnection,
+    isSupabaseOnlineReady,
+    getRequiredTables: () => [...REQUIRED_TABLES],
     renderSupabaseStatus,
     renderSupabaseDiagnostics,
     getFriendlyErrorMessage,

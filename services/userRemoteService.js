@@ -91,15 +91,33 @@
     }
   }
 
+  async function ensureAnonymousUserProfile(nickname = "anonymous") {
+    const client = supabase();
+    const id = getAnonymousUserId();
+    const payload = {
+      id,
+      user_id: id,
+      nickname: nickname || getLocalNickname("anonymous"),
+      email: null,
+      avatar_url: null,
+      provider: "local",
+      updated_at: new Date().toISOString()
+    };
+    if (!client) return { ...payload, isRemote: false, isAuthenticated: false };
+    try {
+      const { data, error } = await client.from("users").upsert(payload, { onConflict: "id" }).select().single();
+      if (error) throw error;
+      return { ...data, id, isRemote: true, isAuthenticated: false };
+    } catch (error) {
+      console.warn("anonymous user profile upsert skipped:", error);
+      return { ...payload, isRemote: false, isAuthenticated: false };
+    }
+  }
+
   async function getOrCreateUser(nickname = "anonymous") {
     const authUser = getCurrentAuthUser() || await refreshSession().catch(() => null);
     if (!authUser) {
-      return {
-        id: getAnonymousUserId(),
-        nickname: nickname || getLocalNickname("anonymous"),
-        isRemote: false,
-        isAuthenticated: false
-      };
+      return ensureAnonymousUserProfile(nickname || getLocalNickname("anonymous"));
     }
     return ensureAuthUserProfile(nickname);
   }
@@ -238,6 +256,7 @@
     getOrCreateUser,
     getOrCreateRemoteUser: getOrCreateUser,
     ensureAuthUserProfile,
+    ensureAnonymousUserProfile,
     updateRemoteNickname: updateNicknameRemote,
     updateNicknameRemote,
     getRankingProfile,
