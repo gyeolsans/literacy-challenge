@@ -434,7 +434,9 @@
       .eq("id", roomId)
       .neq("status", "finished");
     if (error) throw Object.assign(error, { stage: "rooms finish update" });
-    await supabase.from("room_matches").insert({ room_id: roomId, winner_user_id: winnerUserId, result_summary: { players: sorted, winner_user_id: winnerUserId, finished_at: now } });
+    const matchPayload = { room_id: roomId, result_summary: { players: sorted, winner_user_id: winnerUserId, finished_at: now } };
+    if (winnerUserId && !String(winnerUserId).startsWith("guest_")) matchPayload.winner_user_id = winnerUserId;
+    await supabase.from("room_matches").insert(matchPayload);
     return { players: sorted, winner_user_id: winnerUserId, finished_at: now };
   }
 

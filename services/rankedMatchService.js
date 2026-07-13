@@ -36,11 +36,11 @@
   }
 
   function player1Id(match) {
-    return match?.player_a_id || match?.player1_user_id;
+    return match?.player1_user_id || match?.player_a_id;
   }
 
   function player2Id(match) {
-    return match?.player_b_id || match?.player2_user_id;
+    return match?.player2_user_id || match?.player_b_id;
   }
 
   function result1(match) {
@@ -49,6 +49,10 @@
 
   function result2(match) {
     return match?.player_b_result || match?.player2_result || match?.bot_result;
+  }
+
+  function userKey(user) {
+    return user?.user_id || user?.id;
   }
 
   function botProfileForRating(rating = 1000) {
@@ -124,7 +128,7 @@
       .from("ranked_matches")
       .select("*")
       .in("status", ["matching", "playing"])
-      .or(`player_a_id.eq.${userId},player_b_id.eq.${userId},player1_user_id.eq.${userId},player2_user_id.eq.${userId}`)
+      .or(`player1_user_id.eq.${userId},player2_user_id.eq.${userId}`)
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle();
@@ -156,7 +160,8 @@
       const match = await getMatch(matchId);
       if (!match) throw new Error("Ranked match was not found.");
       if (match.status !== "matching") throw new Error(`Cannot join match with status ${match.status}.`);
-      if (player1Id(match) === user.id) return match;
+      const currentUserId = userKey(user);
+      if (player1Id(match) === currentUserId) return match;
       if (player2Id(match)) throw new Error("Ranked match already has player2.");
       const questionSet = Array.isArray(match.question_set) && match.question_set.length
         ? match.question_set
@@ -166,10 +171,8 @@
       const { data, error } = await supabase
         .from("ranked_matches")
         .update({
-          player_b_id: user.id,
-          player2_user_id: user.id,
+          player2_user_id: currentUserId,
           player2_nickname: user.nickname || "anonymous",
-          player_b_result: seedResult,
           player2_result: seedResult,
           question_set: questionSet,
           question_count: Number(match.question_count || questionSet.length || settings.count || 5),
@@ -198,10 +201,11 @@
     log("ranked.startRankedQueue", "called", { user, profile, settings });
     try {
       const supabase = ensureOnline();
-      if (!user?.id) throw new Error("user.id is required.");
+      const currentUserId = userKey(user);
+      if (!currentUserId) throw new Error("user.user_id is required.");
       if (!profile?.user_id) throw new Error("ranking profile is required.");
 
-      const active = await getActiveMatchForUser(user.id);
+      const active = await getActiveMatchForUser(currentUserId);
       if (active) {
         log("ranked.startRankedQueue", "active match reused", active);
         return { match: active, created: false, reused: true };
@@ -211,7 +215,7 @@
         .from("ranked_matches")
         .select("*")
         .eq("status", "matching")
-        .neq("player_a_id", user.id)
+        .neq("player1_user_id", currentUserId)
         .order("created_at", { ascending: true })
         .limit(20);
       if (queueError) {
@@ -234,14 +238,12 @@
       const now = new Date().toISOString();
       const seedResult = { rating: myRating, nickname: user.nickname || "anonymous" };
       const payload = {
-        player_a_id: user.id,
-        player1_user_id: user.id,
+        player1_user_id: currentUserId,
         player1_nickname: user.nickname || "anonymous",
         status: "matching",
         difficulty: settings.difficulty || "normal",
         question_count: Number(settings.count || questionSet.length || 5),
         question_set: questionSet,
-        player_a_result: seedResult,
         player1_result: seedResult,
         created_at: now,
         updated_at: now
@@ -322,19 +324,20 @@
     log("ranked.finishRankedPlayer", "called", { matchId: match?.id, user, result });
     try {
       if (!match?.id) throw new Error("match.id is required.");
-      const isPlayer1 = player1Id(match) === user.id;
-      const isPlayer2 = player2Id(match) === user.id;
+      const currentUserId = userKey(user);
+      const isPlayer1 = player1Id(match) === currentUserId;
+      const isPlayer2 = player2Id(match) === currentUserId;
       if (!isPlayer1 && !isPlayer2) throw new Error("Current user is not a player in this ranked match.");
       const payload = {
         ...result,
-        user_id: user.id,
+        user_id: currentUserId,
         nickname: user.nickname || result.nickname || "anonymous",
         rating: Number(result.rating || (isPlayer1 ? result1(match)?.rating : result2(match)?.rating) || 1000),
         submitted_at: new Date().toISOString()
       };
       const updatePayload = isPlayer1
-        ? { player_a_result: payload, player1_result: payload, updated_at: new Date().toISOString() }
-        : { player_b_result: payload, player2_result: payload, updated_at: new Date().toISOString() };
+        ? { player1_result: payload, updated_at: new Date().toISOString() }
+        : { player2_result: payload, updated_at: new Date().toISOString() };
       const supabase = ensureOnline();
       const { data, error } = await supabase.from("ranked_matches").update(updatePayload).eq("id", match.id).select().single();
       if (error) throw Object.assign(error, { stage: "ranked_matches result update" });
@@ -416,7 +419,6 @@
           .from("ranked_matches")
           .update({
             bot_result: b,
-            player_b_result: b,
             player2_result: b,
             updated_at: new Date().toISOString()
           })
@@ -438,18 +440,21 @@
       const winnerUserId = comparison < 0 ? player1Id(match) : comparison > 0 ? (match.is_bot_match ? null : player2Id(match)) : null;
       const now = new Date().toISOString();
       const supabase = ensureOnline();
+      const finishPayload = {
+        status: "finished",
+        rating_delta_a: deltaA,
+        rating_delta_b: deltaB,
+        rating_delta_player1: deltaA,
+        rating_delta_player2: deltaB,
+        finished_at: now,
+        updated_at: now
+      };
+      if (winnerUserId && !String(winnerUserId).startsWith("guest_")) {
+        finishPayload.winner_user_id = winnerUserId;
+      }
       const { data: finished, error } = await supabase
         .from("ranked_matches")
-        .update({
-          status: "finished",
-          winner_user_id: winnerUserId,
-          rating_delta_a: deltaA,
-          rating_delta_b: deltaB,
-          rating_delta_player1: deltaA,
-          rating_delta_player2: deltaB,
-          finished_at: now,
-          updated_at: now
-        })
+        .update(finishPayload)
         .eq("id", matchId)
         .select()
         .single();
@@ -473,7 +478,7 @@
       .from("ranked_matches")
       .update({ status: "cancelled", cancelled_at: new Date().toISOString(), updated_at: new Date().toISOString() })
       .eq("id", matchId)
-      .eq("player_a_id", userId)
+      .eq("player1_user_id", userId)
       .eq("status", "matching")
       .select();
     if (error) throw Object.assign(error, { stage: "ranked match cancel" });

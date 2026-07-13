@@ -227,6 +227,10 @@ on public.room_players(room_id);
 create index if not exists idx_room_players_user_id
 on public.room_players(user_id);
 
+-- Test guest mode note:
+-- If this project still uses uuid user columns, guest IDs like guest_xxx cannot be inserted.
+-- For development-only reset to text guest IDs, run supabase-test-guest-schema.sql manually.
+
 create index if not exists idx_ranked_matches_status_created_at
 on public.ranked_matches(status, created_at desc);
 

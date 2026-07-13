@@ -362,6 +362,12 @@ input:focus, select:focus, textarea:focus {
   border: 1px solid var(--line);
   border-radius: 16px;
   line-height: 1.85;
+  white-space: pre-line;
+}
+
+.passage-text {
+  white-space: pre-line;
+  line-height: 1.8;
 }
 
 .options {

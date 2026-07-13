@@ -1,23 +1,12 @@
 (function () {
-  const ANON_KEY = "literacy.anonymousUserId";
-  let authInitialized = false;
-  let authInitPromise = null;
+  const GUEST_ID_KEY = "guestUserId";
+  const GUEST_NICKNAME_KEY = "guestNickname";
+  const LEGACY_ANON_KEY = "literacy.anonymousUserId";
+  const LEGACY_NICKNAME_KEY = "literacy.nickname";
+  const TEST_PROVIDER = "test_guest";
 
   function log(message, data) {
     window.debugLog?.("AUTH", message, data);
-  }
-
-  function fail(message, error) {
-    window.debugError?.("AUTH", message, error);
-  }
-
-  function getAnonymousUserId() {
-    let id = localStorage.getItem(ANON_KEY);
-    if (!id) {
-      id = crypto.randomUUID();
-      localStorage.setItem(ANON_KEY, id);
-    }
-    return id;
   }
 
   function supabase() {
@@ -25,131 +14,177 @@
     return window.SupabaseService.getSupabaseClient();
   }
 
-  function getLocalNickname(fallback = "anonymous") {
-    return localStorage.getItem("literacy.nickname")
-      ? JSON.parse(localStorage.getItem("literacy.nickname"))
-      : fallback;
+  function readJsonStorage(key, fallback = "") {
+    const raw = localStorage.getItem(key);
+    if (!raw) return fallback;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return raw;
+    }
   }
 
-  function authMetadata(user) {
-    return user?.user_metadata || {};
+  function writeNickname(nickname) {
+    localStorage.setItem(GUEST_NICKNAME_KEY, nickname);
+    localStorage.setItem(LEGACY_NICKNAME_KEY, JSON.stringify(nickname));
   }
 
-  function profilePayloadFromAuthUser(user, nickname = null) {
-    const meta = authMetadata(user);
-    const resolvedNickname = nickname || getLocalNickname(meta.name || meta.full_name || "user");
+  function normalizeNickname(nickname) {
+    return String(nickname || "").trim().toLowerCase();
+  }
+
+  function validateNickname(nickname) {
+    const trimmed = String(nickname || "").trim();
+    if (trimmed.length < 2) return "닉네임은 2자 이상이어야 합니다.";
+    if (trimmed.length > 12) return "닉네임은 12자 이하로 입력해 주세요.";
+    if (/\s/.test(trimmed)) return "닉네임에는 공백을 사용할 수 없습니다.";
+    if (!/^[가-힣A-Za-z0-9_]+$/u.test(trimmed)) return "닉네임은 한글, 영문, 숫자, 언더바만 사용할 수 있습니다.";
+    return "";
+  }
+
+  function getOrCreateTestGuestId() {
+    let id = localStorage.getItem(GUEST_ID_KEY) || localStorage.getItem(LEGACY_ANON_KEY);
+    if (!id || !String(id).startsWith("guest_")) {
+      id = "guest_" + crypto.randomUUID();
+    }
+    localStorage.setItem(GUEST_ID_KEY, id);
+    localStorage.setItem(LEGACY_ANON_KEY, id);
+    return id;
+  }
+
+  function getOrCreateGuestNickname() {
+    let nickname = localStorage.getItem(GUEST_NICKNAME_KEY) || readJsonStorage(LEGACY_NICKNAME_KEY, "");
+    if (!nickname) {
+      nickname = "Guest" + Math.floor(100000 + Math.random() * 900000);
+    }
+    writeNickname(String(nickname));
+    return String(nickname);
+  }
+
+  async function getCurrentTestUser() {
+    const user_id = getOrCreateTestGuestId();
+    const nickname = getOrCreateGuestNickname();
     return {
-      id: user.id,
-      user_id: user.id,
-      nickname: resolvedNickname,
-      email: user.email || null,
-      avatar_url: meta.avatar_url || meta.picture || null,
-      provider: user.app_metadata?.provider || null,
-      updated_at: new Date().toISOString()
+      id: user_id,
+      user_id,
+      nickname,
+      nickname_normalized: normalizeNickname(nickname),
+      is_guest: true,
+      isAuthenticated: true,
+      isRemote: false,
+      provider: TEST_PROVIDER
     };
   }
 
-  function getCurrentAuthUser() {
-    return window.currentAuthUser || window.currentSession?.user || null;
+  function normalizeRemoteUser(row, fallbackUser) {
+    const user_id = row?.user_id || row?.id || fallbackUser.user_id;
+    return {
+      ...fallbackUser,
+      ...row,
+      id: user_id,
+      user_id,
+      nickname: row?.nickname || fallbackUser.nickname,
+      is_guest: row?.is_guest !== false,
+      isAuthenticated: true,
+      isRemote: Boolean(row)
+    };
   }
 
-  function isLoggedIn() {
-    return Boolean(getCurrentAuthUser());
-  }
-
-  async function refreshSession() {
+  async function ensureTestUserProfile() {
+    const user = await getCurrentTestUser();
     const client = supabase();
-    if (!client?.auth) return null;
-    const { data: sessionData, error: sessionError } = await client.auth.getSession();
-    if (sessionError) throw sessionError;
-    window.currentSession = sessionData?.session || null;
-    const { data: userData, error: userError } = await client.auth.getUser();
-    if (userError && sessionData?.session) throw userError;
-    window.currentAuthUser = userData?.user || sessionData?.session?.user || null;
-    return window.currentAuthUser;
-  }
+    if (!client) return user;
 
-  async function ensureAuthUserProfile(nickname = null) {
-    const client = supabase();
-    const authUser = getCurrentAuthUser() || await refreshSession();
-    if (!client || !authUser) return null;
-    const payload = profilePayloadFromAuthUser(authUser, nickname);
+    const now = new Date().toISOString();
+    const payload = {
+      user_id: user.user_id,
+      nickname: user.nickname,
+      nickname_normalized: user.nickname_normalized,
+      provider: TEST_PROVIDER,
+      is_guest: true,
+      updated_at: now
+    };
+
     try {
-      const { data, error } = await client.from("users").upsert(payload, { onConflict: "id" }).select().single();
+      const { data, error } = await client
+        .from("users")
+        .upsert(payload, { onConflict: "user_id" })
+        .select()
+        .single();
       if (error) throw error;
-      log("profile upserted", data);
-      return { ...data, id: authUser.id, isRemote: true, isAuthenticated: true };
+      log("test guest profile upserted", data);
+      return normalizeRemoteUser(data, user);
     } catch (error) {
-      if (String(error?.message || "").includes("user_id") || String(error?.message || "").includes("schema cache")) {
-        const fallbackPayload = { ...payload };
-        delete fallbackPayload.user_id;
-        const { data, error: fallbackError } = await client.from("users").upsert(fallbackPayload, { onConflict: "id" }).select().single();
-        if (fallbackError) throw fallbackError;
-        return { ...data, id: authUser.id, isRemote: true, isAuthenticated: true };
-      }
+      console.error("[guest.ensureTestUserProfile] users upsert failed", error);
       throw error;
     }
   }
 
-  async function ensureAnonymousUserProfile(nickname = "anonymous") {
+  async function checkGuestNicknameAvailable(nickname) {
+    const error = validateNickname(nickname);
+    if (error) return { ok: false, error };
     const client = supabase();
-    const id = getAnonymousUserId();
-    const payload = {
-      id,
-      user_id: id,
-      nickname: nickname || getLocalNickname("anonymous"),
-      email: null,
-      avatar_url: null,
-      provider: "local",
-      updated_at: new Date().toISOString()
-    };
-    if (!client) return { ...payload, isRemote: false, isAuthenticated: false };
-    try {
-      const { data, error } = await client.from("users").upsert(payload, { onConflict: "id" }).select().single();
-      if (error) throw error;
-      return { ...data, id, isRemote: true, isAuthenticated: false };
-    } catch (error) {
-      console.warn("anonymous user profile upsert skipped:", error);
-      return { ...payload, isRemote: false, isAuthenticated: false };
+    if (!client) return { ok: true };
+
+    const normalized = normalizeNickname(nickname);
+    const currentUser = await getCurrentTestUser();
+    const { data, error: selectError } = await client
+      .from("users")
+      .select("user_id,nickname")
+      .eq("nickname_normalized", normalized)
+      .maybeSingle();
+    if (selectError) throw selectError;
+    if (data && data.user_id !== currentUser.user_id) {
+      return { ok: false, error: "이미 사용 중인 닉네임입니다." };
     }
+    return { ok: true };
   }
 
-  async function getOrCreateUser(nickname = "anonymous") {
-    const authUser = getCurrentAuthUser() || await refreshSession().catch(() => null);
-    if (!authUser) {
-      return ensureAnonymousUserProfile(nickname || getLocalNickname("anonymous"));
-    }
-    return ensureAuthUserProfile(nickname);
-  }
+  async function updateGuestNickname(nickname) {
+    const trimmed = String(nickname || "").trim();
+    const error = validateNickname(trimmed);
+    if (error) throw new Error(error);
 
-  async function requireAuthUser() {
-    const user = await getOrCreateUser(getLocalNickname("anonymous"));
-    if (!user?.isAuthenticated) {
-      throw new Error("Login is required for this online feature.");
-    }
-    return user;
-  }
+    const available = await checkGuestNicknameAvailable(trimmed);
+    if (!available.ok) throw new Error(available.error);
 
-  async function updateNicknameRemote(nickname) {
+    writeNickname(trimmed);
+    const user = await getCurrentTestUser();
     const client = supabase();
-    const authUser = getCurrentAuthUser() || await refreshSession().catch(() => null);
-    if (!client || !authUser) return null;
+    if (!client) return user;
+
     const now = new Date().toISOString();
-    const userPayload = profilePayloadFromAuthUser(authUser, nickname);
-    const { data, error } = await client.from("users").upsert(userPayload, { onConflict: "id" }).select().single();
-    if (error) throw error;
-    const { error: profileError } = await client
+    const payload = {
+      user_id: user.user_id,
+      nickname: trimmed,
+      nickname_normalized: normalizeNickname(trimmed),
+      provider: TEST_PROVIDER,
+      is_guest: true,
+      updated_at: now
+    };
+
+    const { data, error: userError } = await client
+      .from("users")
+      .upsert(payload, { onConflict: "user_id" })
+      .select()
+      .single();
+    if (userError) throw userError;
+
+    await client
       .from("ranking_profiles")
-      .update({ nickname, updated_at: now })
-      .eq("user_id", authUser.id);
-    if (profileError) throw profileError;
-    return { ...data, id: authUser.id, isAuthenticated: true };
+      .update({ nickname: trimmed, updated_at: now })
+      .eq("user_id", user.user_id)
+      .then(({ error }) => {
+        if (error && !String(error.message || "").includes("does not exist")) throw error;
+      });
+
+    return normalizeRemoteUser(data, user);
   }
 
   async function getRankingProfile(userId = null) {
     const client = supabase();
-    const authUser = getCurrentAuthUser() || await refreshSession().catch(() => null);
-    const id = userId || authUser?.id;
+    const user = await getCurrentTestUser();
+    const id = userId || user.user_id;
     if (!client || !id) return null;
     const { data, error } = await client.from("ranking_profiles").select("*").eq("user_id", id).maybeSingle();
     if (error) throw error;
@@ -158,20 +193,29 @@
 
   async function createRankingProfileIfNeeded(user = null) {
     const client = supabase();
-    const authUser = getCurrentAuthUser() || await refreshSession().catch(() => null);
-    if (!client || !authUser) {
-      throw new Error("Login is required before creating a ranking profile.");
-    }
-    const remoteUser = user?.isAuthenticated ? user : await ensureAuthUserProfile();
-    const existing = await getRankingProfile(authUser.id);
-    if (existing) return existing;
-    const nickname = remoteUser?.nickname || getLocalNickname("user");
-    const payload = {
-      user_id: authUser.id,
-      nickname,
+    const currentUser = user || await ensureTestUserProfile();
+    if (!client) return {
+      user_id: currentUser.user_id,
+      nickname: currentUser.nickname,
       rating: 1000,
       tier: "랭킹없음",
-      tier_icon: "□",
+      tier_icon: "",
+      ranked_games: 0,
+      wins: 0,
+      losses: 0,
+      draws: 0,
+      is_guest: true
+    };
+
+    const existing = await getRankingProfile(currentUser.user_id);
+    if (existing) return existing;
+
+    const payload = {
+      user_id: currentUser.user_id,
+      nickname: currentUser.nickname,
+      rating: 1000,
+      tier: "랭킹없음",
+      tier_icon: "",
       division: 5,
       ranked_games: 0,
       percentile: null,
@@ -180,74 +224,89 @@
       wins: 0,
       losses: 0,
       draws: 0,
+      win_streak: 0,
+      lose_streak: 0,
+      promotion_series_active: false,
+      promotion_wins: 0,
+      promotion_losses: 0,
+      is_guest: true,
       updated_at: new Date().toISOString()
     };
-    const { data, error } = await client.from("ranking_profiles").upsert(payload, { onConflict: "user_id" }).select().single();
+    const { data, error } = await client
+      .from("ranking_profiles")
+      .upsert(payload, { onConflict: "user_id" })
+      .select()
+      .single();
     if (error) throw error;
     return data;
   }
 
-  async function signInWithGoogle() {
-    const client = supabase();
-    if (!client?.auth) throw new Error("Supabase Auth is not available.");
-    const { error } = await client.auth.signInWithOAuth({
-      provider: "google",
-      options: { redirectTo: window.location.origin + window.location.pathname }
+  async function requireAuthUser() {
+    return ensureTestUserProfile();
+  }
+
+  async function getOrCreateUser() {
+    return ensureTestUserProfile();
+  }
+
+  function getCurrentAuthUser() {
+    return null;
+  }
+
+  function isLoggedIn() {
+    return true;
+  }
+
+  async function initAuth() {
+    const user = await ensureTestUserProfile().catch((error) => {
+      console.warn("test guest bootstrap skipped:", error);
+      return getCurrentTestUser();
     });
-    if (error) throw error;
+    renderAuthStatus();
+    return user;
+  }
+
+  async function refreshSession() {
+    return getCurrentTestUser();
+  }
+
+  async function signInWithGoogle() {
+    throw new Error("Google login is disabled in test guest mode.");
   }
 
   async function signInWithNaver() {
-    window.showNotice?.("Naver login is not ready yet. Please use Google login first.", "info");
+    throw new Error("Naver login is disabled in test guest mode.");
   }
 
   async function signOut() {
-    const client = supabase();
-    if (client?.auth) await client.auth.signOut();
     localStorage.removeItem("currentRoomId");
     localStorage.removeItem("currentRoomUserId");
     localStorage.removeItem("currentRoomMode");
     localStorage.removeItem("currentRankedMatchId");
-    window.currentSession = null;
-    window.currentAuthUser = null;
-    location.reload();
+    renderAuthStatus();
   }
 
   function renderAuthStatus() {
     const target = document.querySelector("[data-auth-status]");
     if (!target) return;
-    const user = getCurrentAuthUser();
-    target.innerHTML = user
-      ? `<strong>Logged in</strong><p class="muted">${user.email || user.id}</p>`
-      : `<strong>Not logged in</strong><p class="muted">Solo tests work without login. Rooms and ranked matches require Google login.</p>`;
-  }
-
-  async function initAuth() {
-    if (authInitPromise) return authInitPromise;
-    authInitPromise = (async () => {
-      const client = supabase();
-      if (!client?.auth) return null;
-      const user = await refreshSession();
-      if (user) await ensureAuthUserProfile().catch((error) => fail("profile bootstrap failed", error));
-      if (!authInitialized) {
-        client.auth.onAuthStateChange(async (event, session) => {
-          log("state changed", { event, user: session?.user });
-          window.currentSession = session || null;
-          window.currentAuthUser = session?.user || null;
-          if (session?.user) await ensureAuthUserProfile().catch((error) => fail("profile upsert after auth change failed", error));
-          renderAuthStatus();
-          const current = location.hash.replace("#", "") || "home";
-          if (["profile", "ranked", "rooms", "ranking"].includes(current)) window.showView?.(current);
-        });
-        authInitialized = true;
-      }
-      return user;
-    })();
-    return authInitPromise;
+    const nickname = getOrCreateGuestNickname();
+    const guestId = getOrCreateTestGuestId();
+    target.innerHTML = `
+      <strong>테스트 모드</strong>
+      <p class="muted">현재 닉네임: ${nickname}</p>
+      <p class="muted">브라우저/기기별 guest ID로 기록됩니다. ${guestId}</p>
+    `;
   }
 
   window.UserRemoteService = {
-    getAnonymousUserId,
+    getOrCreateTestGuestId,
+    getOrCreateGuestNickname,
+    getCurrentTestUser,
+    ensureTestUserProfile,
+    updateGuestNickname,
+    checkGuestNicknameAvailable,
+    validateNickname,
+    getAnonymousUserId: getOrCreateTestGuestId,
     getCurrentAuthUser,
     isLoggedIn,
     initAuth,
@@ -255,10 +314,10 @@
     requireAuthUser,
     getOrCreateUser,
     getOrCreateRemoteUser: getOrCreateUser,
-    ensureAuthUserProfile,
-    ensureAnonymousUserProfile,
-    updateRemoteNickname: updateNicknameRemote,
-    updateNicknameRemote,
+    ensureAuthUserProfile: ensureTestUserProfile,
+    ensureAnonymousUserProfile: ensureTestUserProfile,
+    updateRemoteNickname: updateGuestNickname,
+    updateNicknameRemote: updateGuestNickname,
     getRankingProfile,
     createRankingProfileIfNeeded,
     signInWithGoogle,
