@@ -260,14 +260,63 @@ async function checkApiAvailable() {
   return true;
 }
 
+function countTextMatches(text, regex) {
+  return (String(text || "").match(regex) || []).length;
+}
+
+function textQualityStats(text = "") {
+  const value = String(text || "");
+  return {
+    value,
+    length: value.trim().length,
+    korean: countTextMatches(value, /[가-힣]/g),
+    english: countTextMatches(value, /[A-Za-z]/g),
+    questionMarks: countTextMatches(value, /\?/g),
+    replacement: countTextMatches(value, /�|占/g),
+    cjk: countTextMatches(value, /[\u4E00-\u9FFF]/g),
+    weirdSymbols: countTextMatches(value, /[뼬뭄묒옙썩ㅿ]/g)
+  };
+}
+
+function looksGarbled(text, { minLength = 1, minKorean = 1 } = {}) {
+  const stats = textQualityStats(text);
+  if (!text || typeof text !== "string") return true;
+  if (stats.length < minLength) return true;
+  if (stats.replacement > 0) return true;
+  if (stats.weirdSymbols > 0) return true;
+  if (stats.questionMarks >= 5 && stats.questionMarks > stats.korean * 0.25) return true;
+  if (stats.cjk > Math.max(2, stats.korean * 0.25)) return true;
+  if (stats.korean < minKorean) return true;
+  if (stats.english > Math.max(10, stats.korean * 0.55)) return true;
+  return false;
+}
+
+function isMostlyKoreanText(text, minKorean = 1) {
+  const stats = textQualityStats(text);
+  if (stats.replacement > 0 || stats.weirdSymbols > 0) return false;
+  if (stats.korean < minKorean) return false;
+  if (stats.english > Math.max(10, stats.korean * 0.55)) return false;
+  if (stats.cjk > Math.max(2, stats.korean * 0.25)) return false;
+  if (stats.questionMarks > Math.max(5, stats.korean * 0.25)) return false;
+  return true;
+}
+
+function validateKoreanField(text, { minLength = 1, minKorean = 1 } = {}) {
+  return !looksGarbled(text, { minLength, minKorean }) && isMostlyKoreanText(text, minKorean);
+}
+
 function validateQuestion(q) {
   if (!q || typeof q !== "object") return false;
   if (!q.id || !q.passage || !q.question || !q.explanation) return false;
   if (!Object.keys(TYPE_LABELS).includes(q.type)) return false;
   if (!Object.keys(DIFFICULTY_LABELS).includes(q.difficulty)) return false;
+  if (!validateKoreanField(q.passage, { minLength: 20, minKorean: 10 })) return false;
+  if (!validateKoreanField(q.question, { minLength: 4, minKorean: 2 })) return false;
+  if (!validateKoreanField(q.explanation, { minLength: 8, minKorean: 4 })) return false;
   if (q.answerType === "multiple_choice") {
     return Array.isArray(q.options) &&
       q.options.length === 4 &&
+      q.options.every((option) => validateKoreanField(option, { minLength: 1, minKorean: 1 })) &&
       Number.isInteger(Number(q.answer)) &&
       Number(q.answer) >= 0 &&
       Number(q.answer) <= 3;
@@ -275,9 +324,12 @@ function validateQuestion(q) {
   if (q.answerType === "short_answer") {
     return Array.isArray(q.sampleAnswers) &&
       q.sampleAnswers.length > 0 &&
+      q.sampleAnswers.every((answer) => validateKoreanField(answer, { minLength: 2, minKorean: 1 })) &&
       Array.isArray(q.keywords) &&
       q.keywords.length > 0 &&
-      Array.isArray(q.requiredKeywords);
+      q.keywords.every((keyword) => validateKoreanField(keyword, { minLength: 1, minKorean: 1 })) &&
+      Array.isArray(q.requiredKeywords) &&
+      q.requiredKeywords.every((keyword) => validateKoreanField(keyword, { minLength: 1, minKorean: 1 }));
   }
   return false;
 }
