@@ -61,6 +61,12 @@
   function getFriendlyErrorMessage(error) {
     const message = String(error?.message || error || "");
     const code = error?.code || error?.details?.code;
+    const missingColumnMatch = message.match(/Could not find the '([^']+)' column of '([^']+)' in the schema cache/i);
+    if (code === "PGRST204" || missingColumnMatch) {
+      const column = missingColumnMatch?.[1] || "unknown_column";
+      const table = missingColumnMatch?.[2] || "unknown_table";
+      return `컬럼 누락: ${table}.${column}. supabase-schema.sql을 실행한 뒤 Supabase 스키마 캐시가 갱신될 때까지 잠시 기다린 후 새로고침하세요.`;
+    }
     if (message.includes("Failed to fetch")) {
       return "네트워크 요청에 실패했습니다. Supabase URL/anon key, 인터넷 연결, Supabase 프로젝트 상태, CORS를 확인해 주세요.";
     }

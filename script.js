@@ -16,6 +16,18 @@ function debugError(scope, message, error) {
 
 function formatSupabaseError(error, context = {}) {
   if (!error) return "unknown error";
+  const message = String(error.message || "");
+  const missingColumnMatch = message.match(/Could not find the '([^']+)' column of '([^']+)' in the schema cache/i);
+  if (error.code === "PGRST204" || missingColumnMatch) {
+    const column = missingColumnMatch?.[1] || context.column || error.column || "unknown_column";
+    const table = missingColumnMatch?.[2] || context.table || error.table || "unknown_table";
+    return [
+      `컬럼 누락: ${table}.${column}`,
+      "supabase-schema.sql을 실행한 뒤 Supabase 스키마 캐시가 갱신될 때까지 잠시 기다린 후 새로고침하세요.",
+      `message=${message || "PGRST204 schema cache column missing"}`,
+      `code=${error.code || "PGRST204"}`
+    ].join(" / ");
+  }
   const metadata = {
     functionName: context.functionName || error.functionName,
     table: context.table || error.table,

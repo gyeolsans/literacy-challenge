@@ -4,13 +4,19 @@ create table if not exists public.users (
   id uuid primary key default gen_random_uuid(),
   user_id text unique,
   nickname text not null,
+  nickname_normalized text,
   email text null,
   avatar_url text null,
-  provider text null,
+  provider text default 'test_guest',
+  is_guest boolean default true,
   auth_user_id uuid null,
   created_at timestamp with time zone default now(),
   updated_at timestamp with time zone default now()
 );
+
+create unique index if not exists unique_users_nickname_normalized
+on public.users(nickname_normalized)
+where nickname_normalized is not null;
 
 create table if not exists public.rooms (
   id uuid primary key default gen_random_uuid(),
@@ -82,6 +88,7 @@ create table if not exists public.ranking_profiles (
   promotion_series_active boolean default false,
   promotion_wins integer default 0,
   promotion_losses integer default 0,
+  is_guest boolean default true,
   updated_at timestamp with time zone default now()
 );
 
@@ -188,8 +195,17 @@ alter table public.rooms add column if not exists cancelled_at timestamp with ti
 alter table public.users add column if not exists user_id text unique;
 alter table public.users add column if not exists email text null;
 alter table public.users add column if not exists avatar_url text null;
-alter table public.users add column if not exists provider text null;
+alter table public.users add column if not exists is_guest boolean default true;
+alter table public.users add column if not exists provider text default 'test_guest';
+alter table public.users add column if not exists nickname_normalized text;
+alter table public.users add column if not exists updated_at timestamptz default now();
 alter table public.users add column if not exists auth_user_id uuid null;
+alter table public.users alter column is_guest set default true;
+alter table public.users alter column provider set default 'test_guest';
+
+create unique index if not exists unique_users_nickname_normalized
+on public.users(nickname_normalized)
+where nickname_normalized is not null;
 
 alter table public.room_players add column if not exists updated_at timestamp with time zone default now();
 alter table public.room_players alter column total_time type numeric using total_time::numeric;
@@ -477,6 +493,18 @@ exception when duplicate_object then null;
 end $$;
 
 -- Room feature compatibility columns for existing projects.
+-- Test guest user compatibility columns for existing projects.
+alter table public.users add column if not exists is_guest boolean default true;
+alter table public.users add column if not exists provider text default 'test_guest';
+alter table public.users add column if not exists nickname_normalized text;
+alter table public.users add column if not exists updated_at timestamptz default now();
+alter table public.users alter column is_guest set default true;
+alter table public.users alter column provider set default 'test_guest';
+
+create unique index if not exists unique_users_nickname_normalized
+on public.users(nickname_normalized)
+where nickname_normalized is not null;
+
 alter table public.rooms add column if not exists room_code text;
 alter table public.rooms add column if not exists host_user_id text;
 alter table public.rooms add column if not exists host_nickname text;
