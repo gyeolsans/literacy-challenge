@@ -11,6 +11,23 @@
     window.debugError?.(scope, message, error);
   }
 
+  function formatSupabaseError(error, context = {}) {
+    if (window.formatSupabaseError) return window.formatSupabaseError(error, context);
+    if (!error) return "unknown error";
+    return [
+      (context.functionName || error.functionName) && `function=${context.functionName || error.functionName}`,
+      (context.table || error.table) && `table=${context.table || error.table}`,
+      (context.queryType || error.queryType) && `query=${context.queryType || error.queryType}`,
+      (context.stage || error.stage) && `stage=${context.stage || error.stage}`,
+      error.message && `message=${error.message}`,
+      error.code && `code=${error.code}`,
+      error.details && `details=${error.details}`,
+      error.hint && `hint=${error.hint}`,
+      error.status && `status=${error.status}`,
+      error.statusText && `statusText=${error.statusText}`
+    ].filter(Boolean).join(" / ") || String(error);
+  }
+
   function ensureOnline() {
     if (!window.SupabaseService?.hasSupabaseConfig?.().ok) {
       throw new Error("Supabase config is required for ranked matches.");
@@ -93,7 +110,10 @@
   async function getMatch(matchId) {
     const supabase = ensureOnline();
     const { data, error } = await supabase.from("ranked_matches").select("*").eq("id", matchId).maybeSingle();
-    if (error) throw Object.assign(error, { stage: "ranked_matches select by id" });
+    if (error) {
+      Object.assign(error, { functionName: "getMatch", table: "ranked_matches", queryType: "select", stage: "ranked_matches select by id" });
+      throw new Error("ranked_matches select failed: " + formatSupabaseError(error));
+    }
     return data;
   }
 
@@ -108,7 +128,10 @@
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle();
-    if (error) throw Object.assign(error, { stage: "ranked_matches active select" });
+    if (error) {
+      Object.assign(error, { functionName: "getActiveMatchForUser", table: "ranked_matches", queryType: "select", stage: "ranked_matches active select" });
+      throw new Error("ranked_matches active select failed: " + formatSupabaseError(error));
+    }
     return data;
   }
 
@@ -158,7 +181,11 @@
         .eq("status", "matching")
         .select()
         .single();
-      if (error) throw Object.assign(error, { stage: "ranked_matches join update" });
+      if (error) {
+        Object.assign(error, { functionName: "joinRankedMatch", table: "ranked_matches", queryType: "update", stage: "ranked_matches join update" });
+        console.error("[ranked.joinRankedMatch] ranked_matches update failed", error);
+        throw new Error("ranked_matches join update failed: " + formatSupabaseError(error));
+      }
       log("ranked.joinRankedMatch", "joined", data);
       return data;
     } catch (error) {
@@ -187,7 +214,10 @@
         .neq("player_a_id", user.id)
         .order("created_at", { ascending: true })
         .limit(20);
-      if (queueError) throw Object.assign(queueError, { stage: "ranked_matches matching select" });
+      if (queueError) {
+        Object.assign(queueError, { functionName: "startRankedQueue", table: "ranked_matches", queryType: "select", stage: "ranked_matches matching select" });
+        throw new Error("ranked_matches matching select failed: " + formatSupabaseError(queueError));
+      }
 
       const myRating = Number(profile.rating || 1000);
       const match = (candidates || []).find((candidate) => {
@@ -217,7 +247,11 @@
         updated_at: now
       };
       const { data, error } = await supabase.from("ranked_matches").insert(payload).select().single();
-      if (error) throw Object.assign(error, { stage: "ranked_matches insert" });
+      if (error) {
+        Object.assign(error, { functionName: "startRankedQueue", table: "ranked_matches", queryType: "insert", stage: "ranked_matches insert" });
+        console.error("[ranked.startRankedQueue] ranked_matches insert failed", error);
+        throw new Error("ranked_matches insert failed: " + formatSupabaseError(error));
+      }
       log("ranked.startRankedQueue", "created", data);
       return { match: data, created: true };
     } catch (error) {

@@ -1,6 +1,6 @@
-console.log("DEPLOY_VERSION", "supabase-ready-v1");
+console.log("DEPLOY_VERSION", "openrouter-room-debug-v1");
 console.log("APP_CONFIG_AT_START", window.APP_CONFIG);
-window.DEPLOY_VERSION = "supabase-ready-v1";
+window.DEPLOY_VERSION = "openrouter-room-debug-v1";
 window.DEBUG_MODE = true;
 
 function debugLog(scope, message, data) {
@@ -14,8 +14,32 @@ function debugError(scope, message, error) {
   window.showNotice?.(`${scope}: ${message} - ${error?.message || error}`, "error", 0);
 }
 
+function formatSupabaseError(error, context = {}) {
+  if (!error) return "unknown error";
+  const metadata = {
+    functionName: context.functionName || error.functionName,
+    table: context.table || error.table,
+    queryType: context.queryType || error.queryType,
+    stage: context.stage || error.stage
+  };
+  const parts = [
+    metadata.functionName && `function=${metadata.functionName}`,
+    metadata.table && `table=${metadata.table}`,
+    metadata.queryType && `query=${metadata.queryType}`,
+    metadata.stage && `stage=${metadata.stage}`,
+    error.message && `message=${error.message}`,
+    error.code && `code=${error.code}`,
+    error.details && `details=${error.details}`,
+    error.hint && `hint=${error.hint}`,
+    error.status && `status=${error.status}`,
+    error.statusText && `statusText=${error.statusText}`
+  ].filter(Boolean);
+  return parts.length ? parts.join(" / ") : String(error);
+}
+
 window.debugLog = debugLog;
 window.debugError = debugError;
+window.formatSupabaseError = formatSupabaseError;
 
 const app = document.querySelector("#app");
 const navButtons = [...document.querySelectorAll("[data-nav]")];
@@ -605,6 +629,9 @@ function supabaseStatusHtml() {
 }
 
 function friendlyOnlineError(error) {
+  if (error?.code || error?.details || error?.hint || error?.stage || error?.table || error?.queryType) {
+    return formatSupabaseError(error);
+  }
   return window.SupabaseService?.getFriendlyErrorMessage?.(error) || error?.message || "알 수 없는 오류";
 }
 
@@ -919,8 +946,9 @@ async function getStoredAIQuestions(settings = {}) {
 
 function questionSourceLabel(source) {
   const labels = {
-    "ai-live": "AI 실시간 생성",
+    "ai-live": "AI 실시간 생성(OpenRouter)",
     "ai-saved": "저장된 AI 문제",
+    "ai-fallback": "내장 AI 스타일 문제",
     saved: "저장된 AI 문제",
     sample: "샘플 문제"
   };
@@ -948,6 +976,25 @@ async function extractFunctionErrorDetail(error) {
   } catch (readError) {
     return { readError: readError?.message || String(readError) };
   }
+}
+
+function formatAIErrorDetail(detail) {
+  if (!detail) return "";
+  if (typeof detail === "string") return detail;
+  if (detail.message && Object.keys(detail).length <= 3) return detail.message;
+  try {
+    return JSON.stringify(detail, null, 2);
+  } catch {
+    return String(detail);
+  }
+}
+
+function buildAIErrorMessage(payload = {}) {
+  const provider = payload.provider ? `[${payload.provider}] ` : "";
+  const model = payload.model ? ` model=${payload.model}` : "";
+  const error = payload.error || payload.message || "AI 생성 실패";
+  const detail = formatAIErrorDetail(payload.detail);
+  return `${provider}${error}${model}${detail ? ` / detail=${detail}` : ""}`;
 }
 
 async function generateAIQuestions(settings) {
@@ -1004,17 +1051,25 @@ async function generateAIQuestions(settings) {
     console.log("[AI] function data", data);
     console.error("[AI] function error", error);
     debugLog("AI", "generate-questions response", { data, error });
+    window.LAST_AI_RESPONSE = data || null;
     if (error) {
       const detail = await extractFunctionErrorDetail(error);
       window.LAST_AI_FUNCTION_ERROR_DETAIL = detail;
       console.error("[AI] function error detail", detail);
-      const message = detail?.error || detail?.message || error.message || String(error);
-      const err = new Error(detail?.detail ? `${message} (${JSON.stringify(detail.detail)})` : message);
+      const message = buildAIErrorMessage({
+        provider: detail?.provider,
+        model: detail?.model,
+        error: detail?.error || detail?.message || error.message || String(error),
+        detail: detail?.detail || detail
+      });
+      const err = new Error(message);
       err.originalError = error;
       err.detail = detail;
+      err.provider = detail?.provider;
+      err.model = detail?.model;
       window.LAST_AI_ERROR = err;
-      showNotice("AI Edge Function 오류: " + err.message, "error", 0);
-      setAIStatus("AI Edge Function 오류: " + err.message, "error");
+      showNotice("AI 생성 실패: " + err.message, "error", 0);
+      setAIStatus("AI 생성 실패: " + err.message, "error");
       throw err;
     }
     if (!data) {
@@ -1025,8 +1080,15 @@ async function generateAIQuestions(settings) {
       throw err;
     }
     if (data.ok === false) {
-      const err = new Error(data.error || data.detail || "AI Edge Function이 실패 응답을 반환했습니다.");
+      const err = new Error(buildAIErrorMessage({
+        provider: data.provider,
+        model: data.model,
+        error: data.error || "AI Edge Function이 실패 응답을 반환했습니다.",
+        detail: data.detail
+      }));
       err.detail = data.detail;
+      err.provider = data.provider;
+      err.model = data.model;
       window.LAST_AI_ERROR = err;
       console.error("[AI] function returned ok false", data);
       showNotice("AI 생성 실패: " + err.message, "error", 0);
@@ -1044,6 +1106,8 @@ async function generateAIQuestions(settings) {
       .map((question, index) => normalizeQuestion(question, "ai-live-" + Date.now() + "-" + index))
       .filter(validateQuestion);
     debugLog("AI", "validated questions", {
+      provider: data.provider,
+      model: data.model,
       rawCount: data.questions.length,
       validCount: questions.length,
       firstQuestion: questions[0]
@@ -1063,9 +1127,11 @@ async function generateAIQuestions(settings) {
       debugError("AI.cache", "questions_cache save failed; live AI questions will still be used", cacheError);
     }
     window.LAST_QUESTION_SOURCE = "ai-live";
+    window.LAST_AI_PROVIDER = data.provider || "openrouter";
+    window.LAST_AI_MODEL = data.model || "";
     console.log("[AI] selected source", "ai-live");
-    showNotice("AI 문제 " + questions.length + "개 생성 완료", "success");
-    setAIStatus("AI 문제 " + questions.length + "개 생성 완료", "info");
+    showNotice("AI 문제 " + questions.length + "개 생성 완료 (" + questionSourceLabel("ai-live") + ")", "success");
+    setAIStatus("AI 문제 " + questions.length + "개 생성 완료" + (data.model ? " / model=" + data.model : ""), "info");
     return questions;
   } catch (error) {
     window.LAST_AI_ERROR = error;
@@ -1100,6 +1166,7 @@ function getSavedAIQuestions() {
 
 async function buildQuestionSet(settings, options = {}) {
   const sourcePreference = options.sourcePreference || settings.questionSource || "ai";
+  let aiFailureReason = "";
   debugLog("buildQuestionSet", "called", { settings, sourcePreference });
 
   if (sourcePreference === "sample") {
@@ -1119,8 +1186,9 @@ async function buildQuestionSet(settings, options = {}) {
       throw new Error("AI generation returned an empty question list.");
     } catch (error) {
       window.LAST_AI_ERROR = error;
+      aiFailureReason = error?.message || String(error);
       debugError("buildQuestionSet", "AI generation failed", error);
-      showNotice("AI generation failed: " + (error?.message || error), "error", 0);
+      showNotice("AI live generation failed: " + aiFailureReason, "warning", 0);
     }
   }
 
@@ -1130,14 +1198,15 @@ async function buildQuestionSet(settings, options = {}) {
     showNotice("Falling back to saved AI questions.", "warning", 0);
     console.log("[AI] selected source", "ai-saved");
     window.LAST_QUESTION_SOURCE = "ai-saved";
-    return { source: "ai-saved", questions: selection.selectedQuestions, message: selection.message };
+    return { source: "ai-saved", questions: selection.selectedQuestions, message: selection.message, aiFailureReason };
   }
 
   const selection = selectQuestionsWithFallback({ questions: SAMPLE_QUESTIONS, settings });
-  showNotice("Falling back to sample questions.", sourcePreference === "ai" ? "warning" : "info", sourcePreference === "ai" ? 0 : 5200);
-  console.log("[AI] selected source", "sample");
-  window.LAST_QUESTION_SOURCE = "sample";
-  return { source: "sample", questions: selection.selectedQuestions, message: selection.message };
+  const fallbackSource = sourcePreference === "ai" ? "ai-fallback" : "sample";
+  showNotice("문제 출처: " + questionSourceLabel(fallbackSource), sourcePreference === "ai" ? "warning" : "info", sourcePreference === "ai" ? 0 : 5200);
+  console.log("[AI] selected source", fallbackSource);
+  window.LAST_QUESTION_SOURCE = fallbackSource;
+  return { source: fallbackSource, questions: selection.selectedQuestions, message: selection.message, aiFailureReason };
 }
 
 function loadSavedAIQuestions() {
@@ -1218,8 +1287,8 @@ async function startTest(sourceMode = "ai", difficultyBoostOverride = false) {
 
     if (!built?.questions?.length) {
       const selection = selectQuestionsWithFallback({ questions: SAMPLE_QUESTIONS, settings });
-      built = { source: "sample", questions: selection.selectedQuestions, message: selection.message };
-      showNotice("샘플 문제로 대체합니다.", "warning", 0);
+      built = { source: sourcePreference === "ai" ? "ai-fallback" : "sample", questions: selection.selectedQuestions, message: selection.message };
+      showNotice(questionSourceLabel(built.source) + "로 대체합니다.", "warning", 0);
     }
 
     const selectedQuestions = sanitizeQuestions(built.questions);
@@ -1342,8 +1411,12 @@ async function getQuestionSetForMultiplayer(settings) {
   debugLog("buildQuestionSet", "multiplayer question source", {
     source: built.source,
     count: built.questions.length,
+    aiFailureReason: built.aiFailureReason || "",
     firstQuestion: built.questions[0]
   });
+  if ((settings.questionSource || "ai") === "ai" && built.source !== "ai-live") {
+    showNotice("AI generation failed; using fallback questions. Source: " + questionSourceLabel(built.source) + (built.aiFailureReason ? " / " + built.aiFailureReason : ""), "warning", 0);
+  }
   return sanitizeQuestions(built.questions);
 }
 
@@ -2245,7 +2318,7 @@ async function requestAiAnalysis(index) {
     `;
   } catch (error) {
     console.error("requestAiAnalysis failed:", error);
-    target.innerHTML = `<p class="result-bad">AI 상세 해설을 불러오지 못했습니다. OpenAI API 설정을 확인해 주세요.</p>`;
+    target.innerHTML = `<p class="result-bad">AI 상세 해설을 불러오지 못했습니다. API 설정을 확인해 주세요.</p>`;
   }
 }
 
@@ -2816,12 +2889,37 @@ async function renderRoomLobby(room, initialPlayers = []) {
   });
 }
 
+function getRankedDisabledReason({ configured, user, profile, rankedLoadError, profileError } = {}) {
+  if (!configured) return "Supabase is not ready.";
+  if (rankedLoadError) return "Ranked table access failed: " + friendlyOnlineError(rankedLoadError);
+  if (!window.UserRemoteService?.isLoggedIn?.() || !user?.isAuthenticated) return "Google login is required for ranked matches.";
+  if (profileError) return "ranking_profiles access failed: " + friendlyOnlineError(profileError);
+  if (!profile) return "ranking profile is not loaded yet.";
+  return "";
+}
+
 async function renderRanked() {
   const configured = isOnlineFeatureAvailable();
-  const canStartRanked = configured && window.UserRemoteService?.isLoggedIn?.();
-  const user = configured ? await window.UserRemoteService.getOrCreateUser(getNickname() || "??").catch(() => null) : null;
-  const profile = configured && user?.isAuthenticated ? await window.UserRemoteService.getRankingProfile(user.id).catch(() => null) : null;
-  const profiles = configured ? await window.RankedMatchService?.getRankingProfiles?.().catch(() => []) : [];
+  let rankedLoadError = null;
+  let profileError = null;
+  const user = configured ? await window.UserRemoteService.getOrCreateUser(getNickname() || "anonymous").catch((error) => {
+    rankedLoadError = error;
+    console.error("[ranked] user load failed", error);
+    return null;
+  }) : null;
+  const profile = configured && user?.isAuthenticated ? await window.UserRemoteService.getRankingProfile(user.id).catch((error) => {
+    profileError = error;
+    console.error("[ranked] ranking profile load failed", error);
+    return null;
+  }) : null;
+  const profiles = configured ? await window.RankedMatchService?.getRankingProfiles?.().catch((error) => {
+    rankedLoadError = rankedLoadError || error;
+    console.error("[ranked] ranking profiles select failed", error);
+    return [];
+  }) : [];
+  const rankedDisabledReason = getRankedDisabledReason({ configured, user, profile, rankedLoadError, profileError });
+  const canStartRanked = !rankedDisabledReason;
+  console.log("[ranked] disabled reason", rankedDisabledReason || "");
   const decorated = window.RatingUtils.decorateProfilesWithPercentTiers(profiles || []);
   const myProfile = decorated.find((row) => row.user_id === user?.id) || profile || {};
   const rankedGames = Number(myProfile.ranked_games ?? (Number(myProfile.wins || 0) + Number(myProfile.losses || 0) + Number(myProfile.draws || 0)));
@@ -2845,7 +2943,7 @@ async function renderRanked() {
       </div>
       <div class="card">
         <div class="actions"><button class="btn primary" data-start-ranked ${canStartRanked ? "" : "disabled"}>랭킹전 시작</button></div>
-        ${canStartRanked ? "" : `<p class="muted">Login with Google to play ranked matches. Nickname-only users are not added to ranking.</p>`}
+        ${canStartRanked ? "" : `<p class="muted">${escapeHtml(rankedDisabledReason)}</p>`}
       </div>
       <div class="card">
         <h3>티어 기준</h3>
@@ -3538,7 +3636,7 @@ function diagnosticsPanelHtml() {
     <div class="card">
       <div class="row between">
         <h3>Supabase diagnostics</h3>
-        <span class="badge info">supabase-ready-v1</span>
+        <span class="badge info">openrouter-room-debug-v1</span>
       </div>
       <div class="actions" style="margin-top:12px">
         <button class="btn" data-diagnostics-action="supabase">Supabase connection</button>
@@ -3586,8 +3684,12 @@ async function testAIEdgeFunction({ alertResult = true } = {}) {
 
   const result = {
     ok: !error && data?.ok !== false,
+    provider: data?.provider || errorDetail?.provider || "",
+    model: data?.model || errorDetail?.model || "",
+    error: error?.message || data?.error || errorDetail?.error || "",
     errorMessage: error?.message || data?.error || errorDetail?.error || "",
     detail: data?.detail || errorDetail?.detail || errorDetail || "",
+    questions: { length: data?.questions?.length || 0 },
     questionsLength: data?.questions?.length || 0,
     firstQuestion: data?.questions?.[0]?.question || "",
     firstPassage: data?.questions?.[0]?.passage || "",
@@ -3608,7 +3710,7 @@ function getLocalStorageDiagnostics() {
     snapshot[name] = safeParse(localStorage.getItem(key), localStorage.getItem(key));
   });
   return {
-    version: window.DEPLOY_VERSION || "supabase-ready-v1",
+    version: window.DEPLOY_VERSION || "openrouter-room-debug-v1",
     hash: location.hash,
     nickname: getNickname(),
     supabaseConfigured: window.SupabaseService?.hasSupabaseConfig?.() || null,

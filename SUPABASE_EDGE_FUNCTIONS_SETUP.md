@@ -1,6 +1,6 @@
 # Supabase Edge Functions 설정
 
-이 앱의 AI 문제 생성은 Vercel `/api/generate-questions`가 아니라 Supabase Edge Function `generate-questions`만 사용합니다. OpenAI API Key는 프론트엔드 파일에 넣지 말고 Supabase Secret으로만 저장하세요.
+이 앱의 AI 문제 생성은 Vercel `/api/generate-questions`가 아니라 Supabase Edge Function `generate-questions`만 사용합니다. OpenRouter API Key는 프론트엔드 파일에 넣지 말고 Supabase Secret으로만 저장하세요.
 
 ## 1. Supabase 스키마 적용
 
@@ -18,26 +18,33 @@ supabase link --project-ref YOUR_PROJECT_REF
 
 `YOUR_PROJECT_REF`는 Supabase 프로젝트 URL의 ref 값입니다.
 
-## 3. OpenAI Key를 Supabase Secret으로 설정
+## 3. OpenRouter Key를 Supabase Secret으로 설정
 
 ```bash
-supabase secrets set OPENAI_API_KEY=YOUR_OPENAI_API_KEY
-supabase secrets set OPENAI_MODEL=gpt-4.1-mini
+supabase.cmd secrets set OPENROUTER_API_KEY=YOUR_OPENROUTER_API_KEY
 ```
 
-`OPENAI_MODEL`은 선택 사항입니다. 설정하지 않으면 Edge Function 기본값을 사용합니다.
+`OPENROUTER_API_KEY`는 OpenRouter 대시보드에서 발급한 API Key입니다. 프론트엔드 `config.js`, `index.html`, `script.js`에는 절대 넣지 마세요.
+
+선택 사항으로 OpenRouter 통계/표시용 referer와 title을 바꿀 수 있습니다.
+
+```bash
+supabase.cmd secrets set OPENROUTER_HTTP_REFERER=https://YOUR_SITE_URL.vercel.app
+supabase.cmd secrets set OPENROUTER_TITLE="Literacy Challenge"
+```
 
 ## 4. Edge Function 배포
 
 ```bash
-supabase functions deploy generate-questions
+supabase.cmd functions deploy generate-questions
 ```
 
 로컬에서 함수만 테스트하려면 `.env.local`에 서버 전용 키를 넣고 실행합니다. 이 파일은 커밋하지 마세요.
 
 ```bash
-OPENAI_API_KEY=YOUR_OPENAI_API_KEY
-OPENAI_MODEL=gpt-4.1-mini
+OPENROUTER_API_KEY=YOUR_OPENROUTER_API_KEY
+OPENROUTER_HTTP_REFERER=http://localhost:3000
+OPENROUTER_TITLE=Literacy Challenge
 ```
 
 ```bash
@@ -70,7 +77,7 @@ APP_CONFIG_AT_START ...
 
 - Supabase connection: 주요 테이블 select/RLS 확인
 - Realtime channel: Supabase Realtime 채널 구독 확인
-- AI Edge Function: `generate-questions` 함수 호출 확인
+- AI Edge Function: `generate-questions` 함수 호출 확인. 결과에서 `provider`, `model`, `ok`, `error`, `detail`, `questionsLength`, 첫 번째 문제를 확인합니다.
 - Refresh rooms: 공개 대기 방 조회 확인
 - Cleanup stale rooms: 오래된 대기 방 취소 처리 확인
 - localStorage state: 현재 방/사용자 로컬 상태 확인
@@ -79,5 +86,5 @@ APP_CONFIG_AT_START ...
 ## 7. 주의
 
 - 프론트엔드에는 Supabase anon public key만 둡니다.
-- `OPENAI_API_KEY`와 Supabase service role key는 `config.js`, `index.html`, `script.js`에 넣지 않습니다.
+- `OPENROUTER_API_KEY`와 Supabase service role key는 `config.js`, `index.html`, `script.js`에 넣지 않습니다.
 - AI 문제 생성 실패 시 앱은 저장된 AI 문제와 샘플 문제로 fallback합니다.

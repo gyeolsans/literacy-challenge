@@ -460,3 +460,49 @@ begin
   alter publication supabase_realtime add table public.ranked_matches;
 exception when duplicate_object then null;
 end $$;
+
+-- Room feature compatibility columns for existing projects.
+alter table public.rooms add column if not exists room_code text;
+alter table public.rooms add column if not exists host_user_id uuid references public.users(id);
+alter table public.rooms add column if not exists host_nickname text;
+alter table public.rooms add column if not exists title text;
+alter table public.rooms add column if not exists status text default 'waiting';
+alter table public.rooms add column if not exists max_players integer default 4;
+alter table public.rooms add column if not exists difficulty text default 'normal';
+alter table public.rooms add column if not exists question_count integer default 5;
+alter table public.rooms add column if not exists question_set jsonb;
+alter table public.rooms add column if not exists include_short_answer boolean default true;
+alter table public.rooms add column if not exists has_time_limit boolean default false;
+alter table public.rooms add column if not exists time_limit_enabled boolean default false;
+alter table public.rooms add column if not exists time_per_question integer default 60;
+alter table public.rooms add column if not exists selected_types jsonb;
+alter table public.rooms add column if not exists started_at timestamptz;
+alter table public.rooms add column if not exists finished_at timestamptz;
+alter table public.rooms add column if not exists cancelled_at timestamptz;
+alter table public.rooms add column if not exists updated_at timestamptz default now();
+
+alter table public.room_players add column if not exists nickname text;
+alter table public.room_players add column if not exists is_host boolean default false;
+alter table public.room_players add column if not exists is_ready boolean default false;
+alter table public.room_players add column if not exists status text default 'joined';
+alter table public.room_players add column if not exists current_index integer default 0;
+alter table public.room_players add column if not exists current_score numeric default 0;
+alter table public.room_players add column if not exists correct_count integer default 0;
+alter table public.room_players add column if not exists partial_count integer default 0;
+alter table public.room_players add column if not exists wrong_count integer default 0;
+alter table public.room_players add column if not exists total_time numeric default 0;
+alter table public.room_players add column if not exists joined_at timestamptz default now();
+alter table public.room_players add column if not exists finished_at timestamptz;
+alter table public.room_players add column if not exists updated_at timestamptz default now();
+
+create unique index if not exists unique_room_players_room_user
+on public.room_players(room_id, user_id);
+
+create index if not exists idx_rooms_status_created_at
+on public.rooms(status, created_at);
+
+create index if not exists idx_room_players_room_id
+on public.room_players(room_id);
+
+create index if not exists idx_room_players_user_id
+on public.room_players(user_id);

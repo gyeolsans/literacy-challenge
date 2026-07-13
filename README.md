@@ -30,7 +30,7 @@ PORT=3001 npm run dev
 
 `index.html`을 더블클릭해서 `file://`로 열면 온라인 기능과 API 기능이 제한됩니다.
 
-온라인 대결, 랭킹전, Supabase 연결, OpenAI API 기능을 확인하려면 반드시 `npm run dev` 또는 Vercel 배포 주소로 접속하세요.
+온라인 대결, 랭킹전, Supabase 연결, AI 문제 생성 기능을 확인하려면 반드시 `npm run dev` 또는 Vercel 배포 주소로 접속하세요.
 
 ## Supabase 설정
 

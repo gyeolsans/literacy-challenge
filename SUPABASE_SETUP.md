@@ -97,11 +97,11 @@ Google 로그인:
 AI 문제 생성:
 
 ```bash
-supabase secrets set OPENAI_API_KEY=YOUR_OPENAI_API_KEY
-supabase functions deploy generate-questions
+supabase.cmd secrets set OPENROUTER_API_KEY=YOUR_OPENROUTER_API_KEY
+supabase.cmd functions deploy generate-questions
 ```
 
-배포 후 관리자 화면의 `AI 문제 생성 테스트` 버튼으로 성공/실패 원인을 확인하세요.
+배포 후 관리자 화면의 `AI 문제 생성 테스트` 버튼으로 `provider`, `model`, 성공/실패 원인을 확인하세요.
 
 배포/캐시 확인:
 

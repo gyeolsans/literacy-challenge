@@ -4,4 +4,4 @@ window.APP_CONFIG = {
 };
 
 // Supabase anon public key는 프론트엔드에서 사용할 수 있습니다.
-// service_role key와 OpenAI API key는 절대 이 파일에 넣지 마세요.
+// service_role key와 OpenRouter/OpenAI 같은 AI provider API key는 절대 이 파일에 넣지 마세요.

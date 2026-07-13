@@ -14,6 +14,23 @@
     window.debugError?.(scope, message, error);
   }
 
+  function formatSupabaseError(error, context = {}) {
+    if (window.formatSupabaseError) return window.formatSupabaseError(error, context);
+    if (!error) return "unknown error";
+    return [
+      (context.functionName || error.functionName) && `function=${context.functionName || error.functionName}`,
+      (context.table || error.table) && `table=${context.table || error.table}`,
+      (context.queryType || error.queryType) && `query=${context.queryType || error.queryType}`,
+      (context.stage || error.stage) && `stage=${context.stage || error.stage}`,
+      error.message && `message=${error.message}`,
+      error.code && `code=${error.code}`,
+      error.details && `details=${error.details}`,
+      error.hint && `hint=${error.hint}`,
+      error.status && `status=${error.status}`,
+      error.statusText && `statusText=${error.statusText}`
+    ].filter(Boolean).join(" / ") || String(error);
+  }
+
   function ensureOnline() {
     if (!window.SupabaseService?.hasSupabaseConfig?.().ok) {
       throw new Error("Supabase config is required for room features.");
@@ -37,7 +54,11 @@
     let query = supabase.from("room_players").select("*").eq("room_id", roomId).order("joined_at", { ascending: true });
     if (!options.includeLeft) query = query.neq("status", "left");
     const { data, error } = await query;
-    if (error) throw Object.assign(error, { stage: "room_players select" });
+    if (error) {
+      Object.assign(error, { functionName: "getRoomPlayers", table: "room_players", queryType: "select", stage: "room_players select" });
+      console.error("[room.getRoomPlayers] room_players select failed", error);
+      throw new Error("room_players select failed: " + formatSupabaseError(error));
+    }
     return data || [];
   }
 
@@ -72,6 +93,8 @@
     try {
       const supabase = ensureOnline();
       if (!user?.id) throw new Error("Cannot create room without user.id.");
+      console.log("[room.createRoom] settings", settings);
+      console.log("[room.createRoom] currentUser", user);
 
       const { data: existingRoom, error: existingError } = await supabase
         .from("rooms")
@@ -88,7 +111,7 @@
       }
 
       const now = new Date().toISOString();
-      const payload = {
+      const roomPayload = {
         room_code: window.RoomCodeUtils.generateRoomCode(),
         host_user_id: user.id,
         host_nickname: user.nickname || "anonymous",
@@ -105,8 +128,13 @@
         created_at: now,
         updated_at: now
       };
-      const { data: room, error } = await supabase.from("rooms").insert(payload).select().single();
-      if (error) throw Object.assign(error, { stage: "rooms insert" });
+      console.log("[room.createRoom] insert room payload", roomPayload);
+      const { data: room, error } = await supabase.from("rooms").insert(roomPayload).select().single();
+      if (error) {
+        Object.assign(error, { functionName: "createRoom", table: "rooms", queryType: "insert", stage: "rooms insert" });
+        console.error("[room.createRoom] rooms insert failed", error);
+        throw new Error("rooms insert failed: " + formatSupabaseError(error));
+      }
       const player = await joinRoom(room, user, true);
       log("room.createRoom", "created", { room, player });
       return { room, player };
@@ -136,30 +164,32 @@
     log("room.getOpenRooms", "called");
     const supabase = ensureOnline();
     await cleanupStaleRooms().catch((error) => fail("room.getOpenRooms", "stale cleanup failed", error));
-    const since = new Date(Date.now() - STALE_ROOM_MINUTES * 60 * 1000).toISOString();
     const { data: rooms, error } = await supabase
       .from("rooms")
       .select("*")
       .eq("status", "waiting")
-      .gte("created_at", since)
-      .not("host_user_id", "is", null)
       .order("created_at", { ascending: false })
-      .limit(30);
-    if (error) throw Object.assign(error, { stage: "rooms waiting list" });
-    const roomIds = (rooms || []).map((room) => room.id);
-    if (!roomIds.length) return [];
+      .limit(20);
+    if (error) {
+      Object.assign(error, { functionName: "getOpenRooms", table: "rooms", queryType: "select", stage: "rooms select waiting list" });
+      console.error("[room.getOpenRooms] rooms select failed", error);
+      throw new Error("rooms select failed: " + formatSupabaseError(error));
+    }
 
-    const { data: players, error: playerError } = await supabase.from("room_players").select("*").in("room_id", roomIds);
-    if (playerError) throw Object.assign(playerError, { stage: "room_players list for rooms" });
-
-    const openRooms = (rooms || [])
-      .map((room) => {
-        const roomPlayers = (players || []).filter((player) => player.room_id === room.id);
+    const openRooms = [];
+    for (const room of rooms || []) {
+      try {
+        const roomPlayers = await getRoomPlayers(room.id);
         const activePlayers = activeOnly(roomPlayers);
         const host = activePlayers.find((player) => player.user_id === room.host_user_id);
-        return { ...room, players: activePlayers, host };
-      })
-      .filter((room) => room.host && room.players.length < Number(room.max_players || MAX_ROOM_PLAYERS));
+        if (host && activePlayers.length < Number(room.max_players || MAX_ROOM_PLAYERS)) {
+          openRooms.push({ ...room, players: activePlayers, host });
+        }
+      } catch (playerError) {
+        console.error("[room.getOpenRooms] room_players select failed", { roomId: room.id, error: playerError });
+        throw playerError;
+      }
+    }
     log("room.getOpenRooms", "result", { count: openRooms.length, openRooms });
     return openRooms;
   }
@@ -204,12 +234,17 @@
         joined_at: existing?.joined_at || now,
         updated_at: now
       };
+      console.log("[room.joinRoom] upsert player payload", payload);
       const { data, error } = await supabase
         .from("room_players")
         .upsert(payload, { onConflict: "room_id,user_id" })
         .select()
         .single();
-      if (error) throw Object.assign(error, { stage: "room_players upsert" });
+      if (error) {
+        Object.assign(error, { functionName: "joinRoom", table: "room_players", queryType: "upsert", stage: "room_players upsert" });
+        console.error("[room.joinRoom] room_players upsert failed", error);
+        throw new Error("room_players upsert failed: " + formatSupabaseError(error));
+      }
       log("room.joinRoom", "joined", data);
       return data;
     } catch (error) {
