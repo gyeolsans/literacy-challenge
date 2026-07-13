@@ -780,6 +780,7 @@ async function getStoredAIQuestions(settings = {}) {
 function questionSourceLabel(source) {
   const labels = {
     "ai-live": "AI 실시간 생성(OpenRouter)",
+    "ai-mixed": "AI 혼합 생성(OpenRouter + fallback)",
     "ai-saved": "저장된 AI 문제",
     "ai-fallback": "내장 AI fallback 문제",
     saved: "저장된 AI 문제",
@@ -828,6 +829,24 @@ function buildAIErrorMessage(payload = {}) {
   const error = payload.error || payload.message || "AI 생성 실패";
   const detail = formatAIErrorDetail(payload.detail);
   return `${provider}${error}${model}${detail ? ` / detail=${detail}` : ""}`;
+}
+
+function summarizeAIError(error) {
+  const text = typeof error === "string" ? error : JSON.stringify({
+    message: error?.message,
+    summary: error?.summary,
+    detail: error?.detail
+  });
+  if (text.includes("This model is unavailable for free") || text.includes("404")) {
+    return "선택한 OpenRouter 무료 모델을 사용할 수 없습니다. 내장 AI fallback 문제를 사용합니다.";
+  }
+  if (text.includes("Unauthorized") || text.includes("401")) {
+    return "OpenRouter API 키 인증에 실패했습니다. 내장 AI fallback 문제를 사용합니다.";
+  }
+  if (text.toLowerCase().includes("validation") || text.includes("검증")) {
+    return "AI가 조건을 만족하는 문제를 충분히 만들지 못했습니다. 내장 AI fallback 문제를 사용합니다.";
+  }
+  return error?.summary || "AI 실시간 생성 실패. 내장 AI fallback 문제를 사용합니다.";
 }
 
 async function generateAIQuestions(settings) {
@@ -888,20 +907,24 @@ async function generateAIQuestions(settings) {
     if (error) {
       const detail = await extractFunctionErrorDetail(error);
       window.LAST_AI_FUNCTION_ERROR_DETAIL = detail;
+      window.LAST_AI_ERROR_DETAIL = detail;
       console.error("[AI] function error detail", detail);
-      const message = buildAIErrorMessage({
+      const fullMessage = buildAIErrorMessage({
         provider: detail?.provider,
         model: detail?.model,
         error: detail?.error || detail?.message || error.message || String(error),
         detail: detail?.detail || detail
       });
+      const message = detail?.summary || summarizeAIError({ message: fullMessage, detail });
       const err = new Error(message);
+      err.fullMessage = fullMessage;
       err.originalError = error;
       err.detail = detail;
       err.provider = detail?.provider;
       err.model = detail?.model;
+      err.summary = message;
       window.LAST_AI_ERROR = err;
-      showNotice("AI 생성 실패: " + err.message, "error", 0);
+      showNotice("AI 생성 실패: " + summarizeAIError(err), "warning", 0);
       setAIStatus("AI 생성 실패: " + err.message, "error");
       throw err;
     }
@@ -913,18 +936,22 @@ async function generateAIQuestions(settings) {
       throw err;
     }
     if (data.ok === false) {
-      const err = new Error(buildAIErrorMessage({
+      window.LAST_AI_ERROR_DETAIL = data.detail || data;
+      const fullMessage = buildAIErrorMessage({
         provider: data.provider,
         model: data.model,
         error: data.error || "AI Edge Function이 실패 응답을 반환했습니다.",
         detail: data.detail
-      }));
+      });
+      const err = new Error(data.summary || summarizeAIError({ message: fullMessage, detail: data.detail }));
+      err.fullMessage = fullMessage;
       err.detail = data.detail;
       err.provider = data.provider;
       err.model = data.model;
+      err.summary = data.summary || err.message;
       window.LAST_AI_ERROR = err;
       console.error("[AI] function returned ok false", data);
-      showNotice("AI 생성 실패: " + err.message, "error", 0);
+      showNotice("AI 생성 실패: " + summarizeAIError(err), "warning", 0);
       setAIStatus("AI 생성 실패: " + err.message, "error");
       throw err;
     }
@@ -997,6 +1024,121 @@ function getSavedAIQuestions() {
   return cleaned;
 }
 
+function fallbackPassageByDifficulty(difficulty = "normal") {
+  if (difficulty === "easy") {
+    return "학교 도서관은 책을 빌리는 곳을 넘어 학생들이 생각을 나누는 장소가 되고 있다. 점심시간마다 짧은 독서 모임이 열리고, 학생들은 같은 책을 읽고도 서로 다른 장면을 중요하게 여긴다는 사실을 배운다. 이런 경험은 글을 혼자 이해하는 힘뿐 아니라 다른 의견을 듣고 비교하는 힘도 길러 준다.";
+  }
+  if (difficulty === "hard") {
+    return [
+      "디지털 플랫폼은 사용자가 원하는 정보를 빠르게 찾도록 돕지만, 동시에 사용자가 무엇을 먼저 보게 될지 정하는 편집자 역할도 한다. 알고리즘은 클릭, 체류 시간, 이전 검색 기록을 바탕으로 화면을 구성하므로 사용자는 자신이 자유롭게 고른다고 느끼면서도 이미 좁혀진 선택지 안에서 판단할 수 있다.",
+      "이 문제를 단순히 개인의 주의력 부족으로만 설명하면 플랫폼이 만든 구조적 조건을 놓치게 된다. 정보 배열의 기준이 공개되지 않을수록 사용자는 어떤 관점이 반복적으로 강조되고 어떤 관점이 사라지는지 파악하기 어렵다. 따라서 디지털 문해력은 자료의 사실 여부를 확인하는 능력뿐 아니라 정보가 배치되는 방식 자체를 질문하는 태도까지 포함해야 한다."
+    ].join("\n\n");
+  }
+  if (difficulty === "expert") {
+    return [
+      "공적 논의에서 합리성은 흔히 더 많은 정보를 모으고 더 정확한 결론에 도달하는 능력으로 이해된다. 그러나 정보가 풍부해질수록 판단이 자동으로 나아진다는 생각은 지나치게 단순하다. 사람들은 자료를 해석할 때 이미 지닌 가치 판단과 사회적 위치, 신뢰하는 집단의 언어를 함께 사용한다. 따라서 같은 통계를 보더라도 어떤 사람은 위험의 증거로 읽고, 다른 사람은 제도 개선의 비용을 과장한 주장으로 읽을 수 있다.",
+      "이 차이는 단순한 무지나 편견만으로 설명되지 않는다. 사회적 쟁점은 대개 사실 판단과 가치 판단이 얽힌 형태로 제시되기 때문이다. 예를 들어 기술 규제 논쟁에서 핵심은 기술이 실제로 위험한지뿐 아니라, 어느 정도의 위험을 사회가 감수할 수 있는지, 위험이 누구에게 집중되는지, 이익을 얻는 주체가 책임도 함께 지는지에 관한 판단이다. 이런 질문은 숫자만으로 닫히지 않는다.",
+      "그렇다고 해서 모든 해석이 똑같이 타당하다는 결론이 따라오는 것은 아니다. 좋은 논증은 자신의 가치 전제를 숨기지 않으면서도 반대 입장이 제기할 수 있는 강한 질문을 미리 검토한다. 또한 특정 사례가 전체 구조를 대표하는지, 예외가 원칙을 무너뜨리는지, 단기적 이익이 장기적 손실을 가리는지 따져야 한다. 합리성은 중립을 가장하는 태도보다 이런 검토 과정을 견디는 능력에 가깝다.",
+      "따라서 문해력 평가는 단순히 글의 중심 내용을 찾는 데서 멈추기 어렵다. 독자는 글이 어떤 문제를 중요하게 만들고 어떤 전제를 배경으로 밀어 넣는지 살펴야 한다. 더 나아가 글의 결론에 동의하지 않더라도 그 결론이 어떤 조건 아래에서는 설득력을 얻는지 판단할 수 있어야 한다. 이때 비판적 읽기는 반박을 빨리 찾는 기술이 아니라, 주장과 근거와 전제가 서로 기대는 방식을 끝까지 추적하는 일이다."
+    ].join("\n\n");
+  }
+  return "지역의 작은 서점들은 단순히 책을 판매하는 공간이 아니라 독자가 서로의 관심사를 발견하는 문화적 거점으로 변하고 있다. 어떤 서점은 저자와의 대화를 열고, 어떤 서점은 청소년 독서 모임이나 지역 기록 전시를 운영한다. 온라인 서점이 빠른 배송과 낮은 가격을 제공한다면, 동네 서점은 우연한 발견과 대면 대화라는 다른 가치를 제공한다. 따라서 서점의 역할을 평가할 때는 판매량뿐 아니라 지역 공동체 안에서 어떤 관계를 만들어 내는지도 함께 보아야 한다.";
+}
+
+function buildInternalFallbackQuestions(settings = {}) {
+  const difficulty = DIFFICULTY_LABELS[settings.difficulty] ? settings.difficulty : "normal";
+  const count = Math.max(Number(settings.count || 5), difficulty === "expert" ? 10 : 20);
+  const passage = fallbackPassageByDifficulty(difficulty);
+  const stems = [
+    {
+      type: "main_idea",
+      question: difficulty === "expert" ? "윗글의 논지를 가장 정확하게 종합한 것은 무엇인가?" : "윗글의 중심 내용으로 가장 알맞은 것은 무엇인가?",
+      options: ["주장의 핵심 구조를 파악해야 한다", "자료의 양만 늘리면 판단은 완성된다", "개인의 취향은 논의에서 제외된다", "빠른 결론이 항상 좋은 읽기이다"],
+      answer: 0,
+      explanation: "글은 단순 정보 확인보다 주장, 근거, 전제의 관계를 파악해야 한다고 설명한다."
+    },
+    {
+      type: "inference",
+      question: "윗글을 바탕으로 추론한 내용으로 가장 적절한 것은 무엇인가?",
+      options: ["판단에는 구조와 맥락을 함께 보는 태도가 필요하다", "모든 의견은 근거와 무관하게 같은 설득력을 가진다", "읽기의 목표는 반대 의견을 즉시 제거하는 것이다", "글의 세부 정보는 중심 주장과 관련이 없다"],
+      answer: 0,
+      explanation: "글은 자료나 문장을 따로 보지 말고 맥락과 논리 구조 속에서 이해해야 한다고 본다."
+    },
+    {
+      type: "evidence",
+      question: "글쓴이의 주장을 뒷받침하는 근거로 가장 알맞은 것은 무엇인가?",
+      options: ["사례와 조건을 함께 검토해야 오해를 줄일 수 있다", "읽는 시간이 짧을수록 핵심을 더 잘 이해한다", "익숙한 주장일수록 검토할 필요가 없다", "수치가 나오면 가치 판단은 사라진다"],
+      answer: 0,
+      explanation: "글은 조건, 사례, 전제를 함께 살피는 과정이 판단의 질을 높인다고 설명한다."
+    },
+    {
+      type: "critical_thinking",
+      question: "윗글의 관점에서 비판적 읽기에 해당하는 태도는 무엇인가?",
+      options: ["결론보다 근거와 전제가 연결되는 방식을 따진다", "마음에 들지 않는 문장을 먼저 반박한다", "어려운 개념은 모두 생략하고 읽는다", "글쓴이의 결론을 무조건 받아들인다"],
+      answer: 0,
+      explanation: "비판적 읽기는 빠른 반박이 아니라 논증이 성립하는 조건을 추적하는 태도이다."
+    }
+  ];
+
+  return Array.from({ length: count }, (_, index) => {
+    const stem = stems[index % stems.length];
+    const answerType = settings.includeShortAnswer !== false && index % 5 === 4 ? "short_answer" : "multiple_choice";
+    return {
+      id: `internal-fallback-${difficulty}-${index + 1}`,
+      difficulty,
+      type: stem.type,
+      answerType,
+      passage,
+      question: answerType === "short_answer" ? "윗글의 핵심 주장을 한 문장으로 쓰세요." : stem.question,
+      options: stem.options,
+      answer: stem.answer,
+      sampleAnswers: ["글의 주장은 근거와 전제의 관계를 함께 살펴야 정확히 이해할 수 있다는 것이다."],
+      keywords: ["주장", "근거", "전제", "관계"],
+      requiredKeywords: ["주장", "근거"],
+      explanation: stem.explanation,
+      points: answerType === "short_answer" ? 15 : 10,
+      source: "fallback"
+    };
+  });
+}
+
+async function completeQuestionsWithFallback(primaryQuestions, settings) {
+  const targetCount = Number(settings?.count || 5);
+  const primarySelection = selectQuestionsWithFallback({ questions: primaryQuestions, settings });
+  const selected = [...primarySelection.selectedQuestions];
+  const selectedIds = new Set(selected.map((question) => question.id));
+  let fallbackAdded = 0;
+
+  if (selected.length < targetCount) {
+    const fallbackPool = mergeQuestionPools([
+      await getStoredAIQuestions(settings),
+      buildInternalFallbackQuestions(settings),
+      SAMPLE_QUESTIONS
+    ]).filter((question) => !selectedIds.has(question.id));
+    const fallbackSelection = selectQuestionsWithFallback({
+      questions: fallbackPool,
+      settings: { ...settings, count: targetCount - selected.length }
+    });
+    fallbackSelection.selectedQuestions.forEach((question) => {
+      if (!selectedIds.has(question.id) && selected.length < targetCount) {
+        selected.push(question);
+        selectedIds.add(question.id);
+        fallbackAdded += 1;
+      }
+    });
+  }
+
+  const messageParts = [];
+  if (primarySelection.message) messageParts.push(primarySelection.message);
+  if (fallbackAdded) messageParts.push(`AI 문제 ${selected.length - fallbackAdded}개 + fallback 문제 ${fallbackAdded}개로 구성했습니다.`);
+
+  return {
+    questions: selected.slice(0, targetCount),
+    fallbackAdded,
+    message: messageParts.join(" ")
+  };
+}
+
 async function buildQuestionSet(settings, options = {}) {
   const sourcePreference = options.sourcePreference || settings.questionSource || "ai";
   let aiFailureReason = "";
@@ -1015,17 +1157,18 @@ async function buildQuestionSet(settings, options = {}) {
     try {
       const aiQuestions = await generateAIQuestions(settings);
       if (aiQuestions?.length) {
-        const selection = selectQuestionsWithFallback({ questions: aiQuestions, settings });
+        const selection = await completeQuestionsWithFallback(aiQuestions, settings);
         provider = window.LAST_AI_PROVIDER || "openrouter";
         model = window.LAST_AI_MODEL || "";
-        return { source: "ai-live", provider, model, questions: selection.selectedQuestions, message: selection.message, error: "" };
+        const source = selection.fallbackAdded ? "ai-mixed" : "ai-live";
+        return { source, provider, model, questions: selection.questions, message: selection.message, error: "" };
       }
       throw new Error("AI generation returned an empty question list.");
     } catch (error) {
       window.LAST_AI_ERROR = error;
-      aiFailureReason = error?.message || String(error);
+      aiFailureReason = summarizeAIError(error);
       debugError("buildQuestionSet", "AI generation failed", error);
-      showNotice("AI가 한국어/난이도 검증을 통과하지 못해 fallback 문제를 확인합니다: " + aiFailureReason, "warning", 0);
+      showNotice(aiFailureReason, "warning", 0);
     }
   }
 
@@ -1038,7 +1181,8 @@ async function buildQuestionSet(settings, options = {}) {
     return { source: "ai-saved", provider, model, questions: selection.selectedQuestions, message: selection.message, aiFailureReason, error: aiFailureReason };
   }
 
-  const selection = selectQuestionsWithFallback({ questions: SAMPLE_QUESTIONS, settings });
+  const fallbackQuestions = sourcePreference === "ai" ? buildInternalFallbackQuestions(settings) : SAMPLE_QUESTIONS;
+  const selection = selectQuestionsWithFallback({ questions: fallbackQuestions, settings });
   const fallbackSource = sourcePreference === "ai" ? "ai-fallback" : "sample";
   showNotice("문제 출처: " + questionSourceLabel(fallbackSource), sourcePreference === "ai" ? "warning" : "info", sourcePreference === "ai" ? 0 : 5200);
   console.log("[AI] selected source", fallbackSource);
@@ -1085,48 +1229,8 @@ async function startTest(sourceMode = "ai", difficultyBoostOverride = false) {
     if (difficultyBoostOverride) settings.difficultyBoost = true;
     const mode = typeof sourceMode === "boolean" ? (sourceMode ? "ai" : "saved") : sourceMode;
     const sourcePreference = mode === "sample" ? "sample" : mode === "saved" ? "saved" : "ai";
-    let built = null;
-    let aiFailureReason = "";
-
-    if (sourcePreference === "sample") {
-      const selection = selectQuestionsWithFallback({ questions: SAMPLE_QUESTIONS, settings });
-      built = { source: "sample", questions: selection.selectedQuestions, message: selection.message };
-      showNotice("샘플 문제로 시작합니다.", "info");
-    } else if (sourcePreference === "saved") {
-      const savedAI = await getStoredAIQuestions(settings);
-      if (savedAI.length) {
-        const selection = selectQuestionsWithFallback({ questions: savedAI, settings });
-        built = { source: "ai-saved", questions: selection.selectedQuestions, message: selection.message };
-      }
-    } else {
-      try {
-        const aiQuestions = await generateAIQuestions(settings);
-        if (aiQuestions?.length) {
-          const selection = selectQuestionsWithFallback({ questions: aiQuestions, settings });
-          built = { source: "ai-live", questions: selection.selectedQuestions, message: selection.message };
-        } else {
-          throw new Error("AI generation returned an empty question list.");
-        }
-      } catch (error) {
-        console.error("[TEST] AI generation failed", error);
-        window.LAST_AI_ERROR = error;
-        aiFailureReason = error?.message || String(error);
-        showNotice("AI 문제 생성 실패: " + (error?.message || error), "error", 0);
-
-        const savedAI = await getStoredAIQuestions(settings);
-        if (savedAI.length) {
-          const selection = selectQuestionsWithFallback({ questions: savedAI, settings });
-          built = { source: "ai-saved", questions: selection.selectedQuestions, message: selection.message };
-          showNotice("저장된 AI 문제로 대체합니다.", "warning", 0);
-        }
-      }
-    }
-
-    if (!built?.questions?.length) {
-      const selection = selectQuestionsWithFallback({ questions: SAMPLE_QUESTIONS, settings });
-      built = { source: sourcePreference === "ai" ? "ai-fallback" : "sample", questions: selection.selectedQuestions, message: selection.message };
-      showNotice(`${questionSourceLabel(built.source)}로 대체합니다.`, "warning", 0);
-    }
+    const built = await buildQuestionSet(settings, { sourcePreference });
+    const aiFailureReason = built.aiFailureReason || built.error || "";
 
     const selectedQuestions = sanitizeQuestions(built.questions);
     const source = built.source;
@@ -1150,7 +1254,8 @@ async function startTest(sourceMode = "ai", difficultyBoostOverride = false) {
       first: selectedQuestions[0]
     });
     if (mode === "ai" && source === "ai-live") showNotice("문제 출처: " + questionSourceLabel(source), "success");
-    if (mode === "ai" && source !== "ai-live") showNotice("AI가 한국어/난이도 검증을 통과하지 못해 대체 문제를 사용합니다: " + (aiFailureReason || "원인 미상") + " / 문제 출처: " + questionSourceLabel(source), "warning", 0);
+    if (mode === "ai" && source === "ai-mixed") showNotice("문제 출처: " + questionSourceLabel(source), "warning", 0);
+    if (mode === "ai" && source !== "ai-live" && source !== "ai-mixed") showNotice((aiFailureReason || "AI 실시간 생성 실패. 내장 AI fallback 문제를 사용합니다.") + " / 문제 출처: " + questionSourceLabel(source), "warning", 0);
     if (mode === "sample") showNotice("문제 출처: " + questionSourceLabel(source), "info");
 
     testState = {
@@ -1160,8 +1265,8 @@ async function startTest(sourceMode = "ai", difficultyBoostOverride = false) {
         ...settings,
         questionSource: source,
         aiFailureReason,
-        aiProvider: source === "ai-live" ? (window.LAST_AI_PROVIDER || "") : "",
-        aiModel: source === "ai-live" ? (window.LAST_AI_MODEL || "") : ""
+        aiProvider: source === "ai-live" || source === "ai-mixed" ? (window.LAST_AI_PROVIDER || "") : "",
+        aiModel: source === "ai-live" || source === "ai-mixed" ? (window.LAST_AI_MODEL || "") : ""
       },
       questions: selectedQuestions,
       currentIndex: 0,
@@ -1257,8 +1362,10 @@ async function getQuestionSetForMultiplayer(settings) {
     aiFailureReason: built.aiFailureReason || "",
     firstQuestion: built.questions[0]
   });
-  if ((settings.questionSource || "ai") === "ai" && built.source !== "ai-live") {
-    showNotice("AI가 한국어/난이도 검증을 통과하지 못해 대체 문제를 사용합니다. 출처: " + questionSourceLabel(built.source) + (built.aiFailureReason ? " / " + built.aiFailureReason : ""), "warning", 0);
+  if ((settings.questionSource || "ai") === "ai" && built.source === "ai-mixed") {
+    showNotice("AI 문제 일부와 fallback 문제를 섞어 대결을 시작합니다. 출처: " + questionSourceLabel(built.source), "warning", 0);
+  } else if ((settings.questionSource || "ai") === "ai" && built.source !== "ai-live") {
+    showNotice("AI 실시간 생성 실패로 대체 문제를 사용합니다. 출처: " + questionSourceLabel(built.source) + (built.aiFailureReason ? " / " + built.aiFailureReason : ""), "warning", 0);
   }
   return sanitizeQuestions(built.questions);
 }

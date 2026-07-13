@@ -15,14 +15,22 @@ const OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_HTTP_REFERER = Deno.env.get("OPENROUTER_HTTP_REFERER") || "https://YOUR_SITE_URL.vercel.app";
 const OPENROUTER_TITLE = Deno.env.get("OPENROUTER_TITLE") || "Literacy Challenge";
 
-const DEEPSEEK_MODEL = "deepseek/deepseek-chat-v3.1:free";
+const AUTO_MODEL = "openrouter/auto";
+const PAID_DEEPSEEK_MODEL = "deepseek/deepseek-chat-v3.1";
+const USE_PAID_OPENROUTER_MODELS = Deno.env.get("USE_PAID_OPENROUTER_MODELS") === "true";
 const MODEL_BY_DIFFICULTY: Record<string, string> = {
-  easy: DEEPSEEK_MODEL,
-  normal: DEEPSEEK_MODEL,
-  hard: DEEPSEEK_MODEL,
-  expert: "qwen/qwen3-235b-a22b:free"
+  easy: AUTO_MODEL,
+  normal: AUTO_MODEL,
+  hard: AUTO_MODEL,
+  expert: AUTO_MODEL
 };
-const FALLBACK_MODELS = [DEEPSEEK_MODEL, "openrouter/auto"];
+const PAID_MODEL_BY_DIFFICULTY: Record<string, string> = {
+  easy: PAID_DEEPSEEK_MODEL,
+  normal: PAID_DEEPSEEK_MODEL,
+  hard: PAID_DEEPSEEK_MODEL,
+  expert: PAID_DEEPSEEK_MODEL
+};
+const FALLBACK_MODELS = [AUTO_MODEL];
 
 const ALLOWED_DIFFICULTIES = new Set(["easy", "normal", "hard", "expert"]);
 const ALLOWED_TYPES = new Set([
@@ -89,12 +97,27 @@ function serializeDetail(detail: unknown) {
   return String(detail || "");
 }
 
+function summarizeGenerationFailure(error: string, detail: unknown = "") {
+  const text = `${error} ${typeof detail === "string" ? detail : JSON.stringify(detail || {})}`;
+  if (text.includes("This model is unavailable for free") || text.includes("404")) {
+    return "OpenRouter model call failed. The app should use built-in AI fallback questions.";
+  }
+  if (text.includes("Unauthorized") || text.includes("401")) {
+    return "OpenRouter API authentication failed. The app should use built-in AI fallback questions.";
+  }
+  if (text.toLowerCase().includes("validation")) {
+    return "AI returned questions, but they did not satisfy Korean or difficulty validation.";
+  }
+  return "AI realtime generation failed. The app should use built-in AI fallback questions.";
+}
+
 function errorResponse(error: string, detail: unknown = "", status = 200, model = "") {
   return jsonResponse({
     ok: false,
     provider: PROVIDER,
     model,
     error,
+    summary: summarizeGenerationFailure(error, detail),
     detail: serializeDetail(detail || error)
   }, status);
 }
@@ -175,10 +198,10 @@ function countSentences(text: string) {
 }
 
 function difficultyMinimums(difficulty: string) {
-  if (difficulty === "easy") return { length: 180, paragraphs: 1, sentences: 3, question: 10, explanation: 30, option: 4 };
-  if (difficulty === "normal") return { length: 350, paragraphs: 1, sentences: 5, question: 14, explanation: 50, option: 6 };
-  if (difficulty === "hard") return { length: 650, paragraphs: 2, sentences: 9, question: 24, explanation: 80, option: 10 };
-  return { length: 1200, paragraphs: 4, sentences: 16, question: 40, explanation: 120, option: 18 };
+  if (difficulty === "easy") return { length: 120, paragraphs: 1, sentences: 3, question: 8, explanation: 25, option: 4 };
+  if (difficulty === "normal") return { length: 220, paragraphs: 1, sentences: 4, question: 10, explanation: 40, option: 5 };
+  if (difficulty === "hard") return { length: 500, paragraphs: 2, sentences: 7, question: 18, explanation: 70, option: 8 };
+  return { length: 1000, paragraphs: 4, sentences: 14, question: 32, explanation: 120, option: 12 };
 }
 
 function validateDifficultyRequirements(q: Question, difficulty: string) {
@@ -318,31 +341,35 @@ function difficultyGuidance(settings: Settings) {
   const guidance: Record<string, string> = {
     easy: [
       "easy 난이도 조건:",
-      "- 지문은 1문단, 3~5문장, 180~300자입니다.",
+      "- 지문은 1문단, 3~4문장, 120~250자입니다.",
       "- 초등 고학년부터 중학생도 이해 가능한 어휘를 사용합니다.",
-      "- 중심 내용, 세부 내용, 단순 추론을 묻습니다."
+      "- 중심 내용, 세부 내용, 단순 추론을 묻습니다.",
+      "- 해설은 25자 이상입니다."
     ].join("\n"),
     normal: [
       "normal 난이도 조건:",
-      "- 지문은 1~2문단, 5~8문장, 350~600자입니다.",
+      "- 지문은 1~2문단, 4~7문장, 220~500자입니다.",
       "- 고등학생 수준의 어휘와 문장 구조를 사용합니다.",
-      "- 주장, 근거, 간단한 추론을 함께 묻습니다."
+      "- 주장, 근거, 간단한 추론을 함께 묻습니다.",
+      "- 해설은 40자 이상이고 객관식 선택지는 각각 5자 이상입니다."
     ].join("\n"),
     hard: [
       "hard 난이도 조건:",
-      "- 지문은 2~3문단, 9~14문장, 650~1000자입니다.",
+      "- 지문은 2~3문단, 7~12문장, 500~900자입니다.",
       "- 추상 개념과 복합 문장을 사용합니다.",
-      "- 반론, 조건, 예외, 비교 구조를 포함하고 2~3단계 추론을 요구합니다."
+      "- 반론, 조건, 예외, 비교 구조를 포함하고 2~3단계 추론을 요구합니다.",
+      "- 해설은 70자 이상입니다."
     ].join("\n"),
     expert: [
       "expert 난이도 조건:",
       "- 지문은 반드시 4~6문단입니다. 각 문단은 빈 줄 한 개, 즉 \\n\\n로 구분합니다.",
-      "- 전체 지문은 최소 1200자 이상, 최소 16문장 이상입니다.",
+      "- 전체 지문은 1000~1700자이고 최소 14문장 이상입니다.",
       "- 주제는 철학, 사회과학, 법/정책, 경제, 과학철학, 언어학, 미학, 문학비평 중 하나를 사용합니다.",
       "- 단순 정보 확인 문제가 아니라 논증 구조, 반론, 조건, 함의를 종합해야 풀 수 있어야 합니다.",
       "- 정답은 지문 전체 구조를 이해해야 고를 수 있어야 합니다.",
       "- 선택지 4개 중 2개 이상은 그럴듯하지만 전체 논리와 충돌하는 함정이어야 합니다.",
       "- 해설은 정답 근거와 오답 배제 이유를 포함하고 최소 120자 이상이어야 합니다.",
+      "- 객관식 선택지는 각각 12자 이상이어야 합니다.",
       "- 영어 문장, 중국어, 일본어, 깨진 문자, 의미 없는 기호가 포함되면 실패입니다.",
       "- JSON key는 영어로 유지하되, JSON value는 모두 자연스러운 한국어로 작성합니다."
     ].join("\n")
@@ -406,8 +433,18 @@ function buildPrompt(settings: Settings, retryReason = "") {
 }
 
 function getModelOrder(settings: Settings) {
-  const selectedModel = MODEL_BY_DIFFICULTY[settings.difficulty] || MODEL_BY_DIFFICULTY.normal;
+  const selectedModel = USE_PAID_OPENROUTER_MODELS
+    ? PAID_MODEL_BY_DIFFICULTY[settings.difficulty] || PAID_DEEPSEEK_MODEL
+    : MODEL_BY_DIFFICULTY[settings.difficulty] || AUTO_MODEL;
   return [...new Set([selectedModel, ...FALLBACK_MODELS])];
+}
+
+function getSelectedModel(settings: Settings) {
+  return getModelOrder(settings)[0] || AUTO_MODEL;
+}
+
+function settingsTemperature(model: string) {
+  return model === AUTO_MODEL ? 0.66 : 0.58;
 }
 
 async function callOpenRouter({ apiKey, model, prompt }: { apiKey: string; model: string; prompt: string }): Promise<OpenRouterResult> {
@@ -433,7 +470,7 @@ async function callOpenRouter({ apiKey, model, prompt }: { apiKey: string; model
         },
         { role: "user", content: prompt }
       ],
-      temperature: model === MODEL_BY_DIFFICULTY.expert ? 0.58 : 0.68
+      temperature: settingsTemperature(model)
     })
   });
 
@@ -530,7 +567,7 @@ async function generateWithRetry(apiKey: string, settings: Settings) {
         preview: result.rawText.slice(0, 1200)
       });
 
-      if (validation.questions.length >= settings.count) {
+      if (validation.questions.length >= 1) {
         return {
           result,
           questions: validation.questions,
@@ -570,9 +607,10 @@ async function generateWithRetry(apiKey: string, settings: Settings) {
   const error = new Error("한국어와 난이도 조건을 만족하는 문제를 생성하지 못했습니다.");
   (error as Error & { detail?: Record<string, unknown> }).detail = {
     provider: PROVIDER,
+    summary: summarizeGenerationFailure("validation failed", failures),
     failures,
     required: settings.difficulty === "expert"
-      ? "expert 문제는 정상 한국어, 1200자 이상 지문, 4문단 이상, 16문장 이상, 120자 이상 해설을 통과해야 합니다."
+      ? "expert 문제는 정상 한국어, 1000자 이상 지문, 4문단 이상, 14문장 이상, 120자 이상 해설을 통과해야 합니다."
       : "모든 사용자 표시 문자열은 정상 한국어이고 난이도별 길이 조건을 통과해야 합니다."
   };
   (error as Error & { model?: string }).model = lastModel;
@@ -586,7 +624,7 @@ Deno.serve(async (req) => {
   try {
     const body = await req.json().catch(() => ({}));
     const settings = normalizeSettings(body);
-    const selectedModel = MODEL_BY_DIFFICULTY[settings.difficulty] || MODEL_BY_DIFFICULTY.normal;
+    const selectedModel = getSelectedModel(settings);
     const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY");
     console.log("[generate-questions] OPENROUTER_API_KEY exists", Boolean(OPENROUTER_API_KEY));
     if (!OPENROUTER_API_KEY) {
@@ -613,6 +651,6 @@ Deno.serve(async (req) => {
   } catch (error) {
     const err = error as Error & { detail?: Record<string, unknown>; model?: string };
     console.error("generate-questions failed", error);
-    return errorResponse(err.message || "generate-questions failed.", err.detail || err, 500, err.model || "");
+    return errorResponse("AI question generation failed", err.detail || err, 500, err.model || "");
   }
 });
