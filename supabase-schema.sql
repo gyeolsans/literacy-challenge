@@ -1,8 +1,8 @@
-create extension if not exists "pgcrypto";
+﻿create extension if not exists "pgcrypto";
 
 create table if not exists public.users (
   id uuid primary key default gen_random_uuid(),
-  user_id text unique,
+  user_id uuid unique,
   nickname text not null,
   nickname_normalized text,
   email text null,
@@ -21,7 +21,7 @@ where nickname_normalized is not null;
 create table if not exists public.rooms (
   id uuid primary key default gen_random_uuid(),
   room_code text unique not null,
-  host_user_id text,
+  host_user_id uuid,
   host_nickname text,
   title text,
   max_players integer default 4,
@@ -44,7 +44,7 @@ create table if not exists public.rooms (
 create table if not exists public.room_players (
   id uuid primary key default gen_random_uuid(),
   room_id uuid references public.rooms(id) on delete cascade,
-  user_id text,
+  user_id uuid,
   nickname text,
   is_host boolean default false,
   is_ready boolean default false,
@@ -64,13 +64,13 @@ create table if not exists public.room_players (
 create table if not exists public.room_matches (
   id uuid primary key default gen_random_uuid(),
   room_id uuid references public.rooms(id) on delete cascade,
-  winner_user_id text null,
+  winner_user_id uuid null,
   result_summary jsonb,
   created_at timestamp with time zone default now()
 );
 
 create table if not exists public.ranking_profiles (
-  user_id text primary key,
+  user_id uuid primary key,
   nickname text not null,
   rating integer default 1000,
   tier text default '랭킹없음',
@@ -94,13 +94,13 @@ create table if not exists public.ranking_profiles (
 
 create table if not exists public.ranked_matches (
   id uuid primary key default gen_random_uuid(),
-  player_a_id text,
-  player_b_id text,
-  player1_user_id text,
-  player2_user_id text,
+  player_a_id uuid,
+  player_b_id uuid,
+  player1_user_id uuid,
+  player2_user_id uuid,
   player1_nickname text,
   player2_nickname text,
-  winner_user_id text null,
+  winner_user_id uuid null,
   status text check (status in ('matching', 'playing', 'finished', 'cancelled')) default 'matching',
   difficulty text,
   question_count integer,
@@ -129,7 +129,7 @@ create table if not exists public.ranked_matches (
 
 create table if not exists public.replays (
   id uuid primary key default gen_random_uuid(),
-  user_id text,
+  user_id uuid,
   nickname text,
   mode text check (mode in ('solo', 'room', 'ranked', 'today')) default 'solo',
   related_match_id uuid null,
@@ -170,7 +170,7 @@ create table if not exists public.replay_items (
 create table if not exists public.public_replay_likes (
   id uuid primary key default gen_random_uuid(),
   replay_id uuid references public.replays(id) on delete cascade,
-  user_id text,
+  user_id uuid,
   created_at timestamp with time zone default now(),
   unique(replay_id, user_id)
 );
@@ -182,7 +182,7 @@ create table if not exists public.questions_cache (
   include_short_answer boolean,
   question_count integer,
   questions jsonb,
-  created_by text null,
+  created_by uuid null,
   created_at timestamp with time zone default now()
 );
 
@@ -192,7 +192,7 @@ alter table public.rooms add column if not exists max_players integer default 4;
 alter table public.rooms add column if not exists updated_at timestamp with time zone default now();
 alter table public.rooms add column if not exists cancelled_at timestamp with time zone null;
 
-alter table public.users add column if not exists user_id text unique;
+alter table public.users add column if not exists user_id uuid unique;
 alter table public.users add column if not exists email text null;
 alter table public.users add column if not exists avatar_url text null;
 alter table public.users add column if not exists is_guest boolean default true;
@@ -216,8 +216,8 @@ alter table public.ranking_profiles add column if not exists rank_position integ
 alter table public.ranking_profiles add column if not exists total_ranked_players integer default 0;
 alter table public.ranking_profiles add column if not exists tier_icon text default '';
 
-alter table public.ranked_matches add column if not exists player1_user_id text;
-alter table public.ranked_matches add column if not exists player2_user_id text;
+alter table public.ranked_matches add column if not exists player1_user_id uuid;
+alter table public.ranked_matches add column if not exists player2_user_id uuid;
 alter table public.ranked_matches add column if not exists player1_nickname text;
 alter table public.ranked_matches add column if not exists player2_nickname text;
 alter table public.ranked_matches add column if not exists player1_result jsonb;
@@ -245,8 +245,8 @@ create index if not exists idx_room_players_user_id
 on public.room_players(user_id);
 
 -- Test guest mode note:
--- If this project still uses uuid user columns, guest IDs like guest_xxx cannot be inserted.
--- For development-only reset to text guest IDs, run supabase-test-guest-schema.sql manually.
+-- User IDs are plain UUID values. Guest status is stored in is_guest=true.
+-- Do not migrate uuid user columns to text for guest mode.
 
 create index if not exists idx_ranked_matches_status_created_at
 on public.ranked_matches(status, created_at desc);
@@ -506,7 +506,7 @@ on public.users(nickname_normalized)
 where nickname_normalized is not null;
 
 alter table public.rooms add column if not exists room_code text;
-alter table public.rooms add column if not exists host_user_id text;
+alter table public.rooms add column if not exists host_user_id uuid;
 alter table public.rooms add column if not exists host_nickname text;
 alter table public.rooms add column if not exists title text;
 alter table public.rooms add column if not exists status text default 'waiting';
@@ -524,7 +524,7 @@ alter table public.rooms add column if not exists finished_at timestamptz;
 alter table public.rooms add column if not exists cancelled_at timestamptz;
 alter table public.rooms add column if not exists updated_at timestamptz default now();
 
-alter table public.room_players add column if not exists user_id text;
+alter table public.room_players add column if not exists user_id uuid;
 alter table public.room_players add column if not exists nickname text;
 alter table public.room_players add column if not exists is_host boolean default false;
 alter table public.room_players add column if not exists is_ready boolean default false;
@@ -551,8 +551,8 @@ on public.room_players(room_id);
 create index if not exists idx_room_players_user_id
 on public.room_players(user_id);
 
-alter table public.ranked_matches add column if not exists player1_user_id text;
-alter table public.ranked_matches add column if not exists player2_user_id text;
+alter table public.ranked_matches add column if not exists player1_user_id uuid;
+alter table public.ranked_matches add column if not exists player2_user_id uuid;
 alter table public.ranked_matches add column if not exists player1_nickname text;
 alter table public.ranked_matches add column if not exists player2_nickname text;
 alter table public.ranked_matches add column if not exists question_set jsonb;
@@ -563,7 +563,7 @@ alter table public.ranked_matches add column if not exists bot_user_id text;
 alter table public.ranked_matches add column if not exists bot_nickname text;
 alter table public.ranked_matches add column if not exists bot_profile jsonb;
 alter table public.ranked_matches add column if not exists bot_result jsonb;
-alter table public.ranked_matches add column if not exists winner_user_id text;
+alter table public.ranked_matches add column if not exists winner_user_id uuid;
 alter table public.ranked_matches add column if not exists started_at timestamptz;
 alter table public.ranked_matches add column if not exists finished_at timestamptz;
 alter table public.ranked_matches add column if not exists cancelled_at timestamptz;
@@ -595,8 +595,6 @@ on public.ranked_matches(player2_user_id);
 create index if not exists idx_ranking_profiles_rating
 on public.ranking_profiles(rating desc);
 
--- Important for existing UUID projects:
--- If users.user_id, room_players.user_id, rooms.host_user_id, ranked_matches.player*_user_id,
--- or ranking_profiles.user_id already exist as uuid, PostgreSQL cannot safely change them to
--- text with these non-destructive add-column statements. For the current no-login test mode,
--- run supabase-test-guest-schema.sql as a development reset so guest_xxx IDs can be inserted.
+-- User id columns use uuid-compatible values. Test guests are distinguished by is_guest=true, not by a string prefix.
+-- Existing uuid columns should remain uuid; do not migrate them to text for guest mode.
+

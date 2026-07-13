@@ -1,4 +1,4 @@
--- Development test guest mode schema.
+﻿-- Development test guest mode schema. User IDs are plain UUID values; guest status is stored in is_guest.
 -- WARNING: This drops prototype data. Run only when you intentionally reset the dev Supabase project.
 
 create extension if not exists "pgcrypto";
@@ -14,7 +14,7 @@ drop table if exists public.questions_cache cascade;
 drop table if exists public.users cascade;
 
 create table public.users (
-  user_id text primary key,
+  user_id uuid primary key,
   nickname text,
   nickname_normalized text,
   provider text default 'test_guest',
@@ -32,7 +32,7 @@ where nickname_normalized is not null;
 create table public.rooms (
   id uuid primary key default gen_random_uuid(),
   room_code text unique not null,
-  host_user_id text references public.users(user_id),
+  host_user_id uuid references public.users(user_id),
   host_nickname text,
   title text,
   max_players integer default 4,
@@ -55,7 +55,7 @@ create table public.rooms (
 create table public.room_players (
   id uuid primary key default gen_random_uuid(),
   room_id uuid references public.rooms(id) on delete cascade,
-  user_id text references public.users(user_id),
+  user_id uuid references public.users(user_id),
   nickname text,
   is_host boolean default false,
   is_ready boolean default false,
@@ -75,13 +75,13 @@ create table public.room_players (
 create table public.room_matches (
   id uuid primary key default gen_random_uuid(),
   room_id uuid references public.rooms(id) on delete cascade,
-  winner_user_id text references public.users(user_id),
+  winner_user_id uuid references public.users(user_id),
   result_summary jsonb,
   created_at timestamptz default now()
 );
 
 create table public.ranking_profiles (
-  user_id text primary key references public.users(user_id) on delete cascade,
+  user_id uuid primary key references public.users(user_id) on delete cascade,
   nickname text,
   rating integer default 1000,
   tier text default '랭킹없음',
@@ -105,11 +105,11 @@ create table public.ranking_profiles (
 
 create table public.ranked_matches (
   id uuid primary key default gen_random_uuid(),
-  player1_user_id text references public.users(user_id),
-  player2_user_id text references public.users(user_id),
+  player1_user_id uuid references public.users(user_id),
+  player2_user_id uuid references public.users(user_id),
   player1_nickname text,
   player2_nickname text,
-  winner_user_id text references public.users(user_id),
+  winner_user_id uuid references public.users(user_id),
   status text default 'matching',
   difficulty text default 'normal',
   question_count integer default 5,
@@ -134,7 +134,7 @@ create table public.ranked_matches (
 
 create table public.replays (
   id uuid primary key default gen_random_uuid(),
-  user_id text references public.users(user_id),
+  user_id uuid references public.users(user_id),
   nickname text,
   mode text default 'solo',
   related_match_id uuid,
@@ -179,7 +179,7 @@ create table public.questions_cache (
   include_short_answer boolean default true,
   question_count integer default 0,
   questions jsonb,
-  created_by text references public.users(user_id),
+  created_by uuid references public.users(user_id),
   created_at timestamptz default now()
 );
 
@@ -228,3 +228,4 @@ begin
   alter publication supabase_realtime add table public.ranked_matches;
 exception when duplicate_object then null;
 end $$;
+

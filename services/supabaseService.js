@@ -61,6 +61,9 @@
   function getFriendlyErrorMessage(error) {
     const message = String(error?.message || error || "");
     const code = error?.code || error?.details?.code;
+    if (code === "22P02" || message.includes("invalid input syntax for type uuid")) {
+      return "UUID 컬럼에 잘못된 user_id가 들어갔습니다. guest_ 접두사를 제거하고 순수 UUID를 사용해야 합니다.";
+    }
     const missingColumnMatch = message.match(/Could not find the '([^']+)' column of '([^']+)' in the schema cache/i);
     if (code === "PGRST204" || missingColumnMatch) {
       const column = missingColumnMatch?.[1] || "unknown_column";

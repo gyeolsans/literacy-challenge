@@ -55,6 +55,10 @@
     return user?.user_id || user?.id;
   }
 
+  function isUuid(value) {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ""));
+  }
+
   function botProfileForRating(rating = 1000) {
     const value = Number(rating || 1000);
     const band = value >= 2200 ? "diamond" : value >= 1800 ? "platinum" : value >= 1400 ? "gold" : value >= 1000 ? "silver" : "bronze";
@@ -449,7 +453,7 @@
         finished_at: now,
         updated_at: now
       };
-      if (winnerUserId && !String(winnerUserId).startsWith("guest_")) {
+      if (isUuid(winnerUserId)) {
         finishPayload.winner_user_id = winnerUserId;
       }
       const { data: finished, error } = await supabase

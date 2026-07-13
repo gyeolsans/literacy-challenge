@@ -1,7 +1,13 @@
-﻿console.log("DEPLOY_VERSION", "stable-realtime-test-mode-v1");
+﻿console.log("DEPLOY_VERSION", "fix-guest-uuid-v1");
 console.log("APP_CONFIG_AT_START", window.APP_CONFIG);
-window.DEPLOY_VERSION = "stable-realtime-test-mode-v1";
+window.DEPLOY_VERSION = "fix-guest-uuid-v1";
 window.DEBUG_MODE = true;
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function isUuid(value) {
+  return UUID_REGEX.test(String(value || ""));
+}
 
 function debugLog(scope, message, data) {
   if (!window.DEBUG_MODE) return;
@@ -17,6 +23,9 @@ function debugError(scope, message, error) {
 function formatSupabaseError(error, context = {}) {
   if (!error) return "unknown error";
   const message = String(error.message || "");
+  if (error.code === "22P02" || message.includes("invalid input syntax for type uuid")) {
+    return "UUID 컬럼에 잘못된 user_id가 들어갔습니다. guest_ 접두사를 제거하고 순수 UUID를 사용해야 합니다.";
+  }
   const missingColumnMatch = message.match(/Could not find the '([^']+)' column of '([^']+)' in the schema cache/i);
   if (error.code === "PGRST204" || missingColumnMatch) {
     const column = missingColumnMatch?.[1] || context.column || error.column || "unknown_column";
@@ -748,7 +757,7 @@ async function saveAIQuestionsToRemoteCache(questions, settings) {
   try {
     const supabase = window.SupabaseService.getSupabaseClient();
     const user = await window.UserRemoteService?.getOrCreateUser?.(getNickname() || "익명").catch(() => null);
-    const userId = user?.id && !String(user.id).startsWith("guest_") ? user.id : null;
+    const userId = isUuid(user?.user_id || user?.id) ? (user.user_id || user.id) : null;
     const { error } = await supabase.from("questions_cache").insert({
       difficulty: settings.difficulty,
       selected_types: settings.selectedTypes || [],
@@ -3606,7 +3615,7 @@ function diagnosticsPanelHtml() {
     <div class="card">
       <div class="row between">
         <h3>Supabase diagnostics</h3>
-        <span class="badge info">stable-realtime-test-mode-v1</span>
+        <span class="badge info">fix-guest-uuid-v1</span>
       </div>
       <div class="actions" style="margin-top:12px">
         <button class="btn" data-diagnostics-action="supabase">Supabase connection</button>
@@ -3680,7 +3689,7 @@ function getLocalStorageDiagnostics() {
     snapshot[name] = safeParse(localStorage.getItem(key), localStorage.getItem(key));
   });
   return {
-    version: window.DEPLOY_VERSION || "stable-realtime-test-mode-v1",
+    version: window.DEPLOY_VERSION || "fix-guest-uuid-v1",
     hash: location.hash,
     nickname: getNickname(),
     supabaseConfigured: window.SupabaseService?.hasSupabaseConfig?.() || null,
@@ -3961,3 +3970,4 @@ function init() {
 }
 
 init();
+

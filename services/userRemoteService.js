@@ -4,6 +4,7 @@
   const LEGACY_ANON_KEY = "literacy.anonymousUserId";
   const LEGACY_NICKNAME_KEY = "literacy.nickname";
   const TEST_PROVIDER = "test_guest";
+  const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
   function log(message, data) {
     window.debugLog?.("AUTH", message, data);
@@ -44,12 +45,24 @@
 
   function getOrCreateTestGuestId() {
     let id = localStorage.getItem(GUEST_ID_KEY) || localStorage.getItem(LEGACY_ANON_KEY);
-    if (!id || !String(id).startsWith("guest_")) {
-      id = "guest_" + crypto.randomUUID();
+    if (!id || String(id).startsWith("guest_") || !UUID_REGEX.test(String(id))) {
+      id = crypto.randomUUID();
     }
     localStorage.setItem(GUEST_ID_KEY, id);
     localStorage.setItem(LEGACY_ANON_KEY, id);
     return id;
+  }
+
+  function normalizeGuestUserId() {
+    const current = localStorage.getItem(GUEST_ID_KEY);
+    const legacy = localStorage.getItem(LEGACY_ANON_KEY);
+    if (current && (current.startsWith("guest_") || !UUID_REGEX.test(current))) {
+      localStorage.removeItem(GUEST_ID_KEY);
+    }
+    if (legacy && (legacy.startsWith("guest_") || !UUID_REGEX.test(legacy))) {
+      localStorage.removeItem(LEGACY_ANON_KEY);
+    }
+    return getOrCreateTestGuestId();
   }
 
   function getOrCreateGuestNickname() {
@@ -62,7 +75,7 @@
   }
 
   async function getCurrentTestUser() {
-    const user_id = getOrCreateTestGuestId();
+    const user_id = normalizeGuestUserId();
     const nickname = getOrCreateGuestNickname();
     return {
       id: user_id,
@@ -95,14 +108,13 @@
     const client = supabase();
     if (!client) return user;
 
-    const now = new Date().toISOString();
     const payload = {
       user_id: user.user_id,
       nickname: user.nickname,
-      nickname_normalized: user.nickname_normalized,
+      nickname_normalized: normalizeNickname(user.nickname),
       provider: TEST_PROVIDER,
       is_guest: true,
-      updated_at: now
+      updated_at: new Date().toISOString()
     };
 
     try {
@@ -174,8 +186,8 @@
       .from("ranking_profiles")
       .update({ nickname: trimmed, updated_at: now })
       .eq("user_id", user.user_id)
-      .then(({ error }) => {
-        if (error && !String(error.message || "").includes("does not exist")) throw error;
+      .then(({ error: profileError }) => {
+        if (profileError && !String(profileError.message || "").includes("does not exist")) throw profileError;
       });
 
     return normalizeRemoteUser(data, user);
@@ -258,6 +270,7 @@
   }
 
   async function initAuth() {
+    normalizeGuestUserId();
     const user = await ensureTestUserProfile().catch((error) => {
       console.warn("test guest bootstrap skipped:", error);
       return getCurrentTestUser();
@@ -267,6 +280,7 @@
   }
 
   async function refreshSession() {
+    normalizeGuestUserId();
     return getCurrentTestUser();
   }
 
@@ -290,16 +304,19 @@
     const target = document.querySelector("[data-auth-status]");
     if (!target) return;
     const nickname = getOrCreateGuestNickname();
-    const guestId = getOrCreateTestGuestId();
+    const guestId = normalizeGuestUserId();
     target.innerHTML = `
       <strong>테스트 모드</strong>
       <p class="muted">현재 닉네임: ${nickname}</p>
-      <p class="muted">브라우저/기기별 guest ID로 기록합니다. ${guestId}</p>
+      <p class="muted">브라우저/기기별 UUID로 기록합니다. ${guestId}</p>
     `;
   }
 
+  normalizeGuestUserId();
+
   window.UserRemoteService = {
     getOrCreateTestGuestId,
+    normalizeGuestUserId,
     getOrCreateGuestNickname,
     getCurrentTestUser,
     ensureTestUserProfile,

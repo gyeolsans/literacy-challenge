@@ -46,6 +46,10 @@
     return Boolean(roomOrSettings.has_time_limit ?? roomOrSettings.time_limit_enabled ?? roomOrSettings.useTimer);
   }
 
+  function isUuid(value) {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ""));
+  }
+
   async function getRoom(roomId) {
     const supabase = ensureOnline();
     const { data, error } = await supabase.from("rooms").select("*").eq("id", roomId).maybeSingle();
@@ -440,7 +444,7 @@
       .neq("status", "finished");
     if (error) throw Object.assign(error, { stage: "rooms finish update" });
     const matchPayload = { room_id: roomId, result_summary: { players: sorted, winner_user_id: winnerUserId, finished_at: now } };
-    if (winnerUserId && !String(winnerUserId).startsWith("guest_")) matchPayload.winner_user_id = winnerUserId;
+    if (isUuid(winnerUserId)) matchPayload.winner_user_id = winnerUserId;
     await supabase.from("room_matches").insert(matchPayload);
     return { players: sorted, winner_user_id: winnerUserId, finished_at: now };
   }
