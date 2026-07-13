@@ -42,6 +42,10 @@
     return players.filter((player) => player.status !== "left");
   }
 
+  function roomHasTimeLimit(roomOrSettings = {}) {
+    return Boolean(roomOrSettings.has_time_limit ?? roomOrSettings.time_limit_enabled ?? roomOrSettings.useTimer);
+  }
+
   async function getRoom(roomId) {
     const supabase = ensureOnline();
     const { data, error } = await supabase.from("rooms").select("*").eq("id", roomId).maybeSingle();
@@ -121,7 +125,8 @@
         difficulty: settings.difficulty || "normal",
         question_count: Number(settings.count || questionSet?.length || 5),
         include_short_answer: Boolean(settings.includeShortAnswer),
-        time_limit_enabled: Boolean(settings.useTimer),
+        has_time_limit: roomHasTimeLimit(settings),
+        time_limit_enabled: roomHasTimeLimit(settings),
         time_per_question: Number(settings.secondsPerQuestion || 60),
         selected_types: settings.selectedTypes || [],
         question_set: Array.isArray(questionSet) ? questionSet : [],
@@ -355,7 +360,7 @@
       includeShortAnswer: room.include_short_answer !== false,
       selectedTypes: Array.isArray(room.selected_types) ? room.selected_types : [],
       questionSource: "ai",
-      useTimer: Boolean(room.time_limit_enabled),
+      useTimer: roomHasTimeLimit(room),
       secondsPerQuestion: Number(room.time_per_question || 60)
     };
     const built = await window.buildQuestionSet(settings, { sourcePreference: "ai" });

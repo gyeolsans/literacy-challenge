@@ -36,19 +36,19 @@
   }
 
   function player1Id(match) {
-    return match?.player1_user_id || match?.player_a_id;
+    return match?.player1_user_id;
   }
 
   function player2Id(match) {
-    return match?.player2_user_id || match?.player_b_id;
+    return match?.player2_user_id;
   }
 
   function result1(match) {
-    return match?.player_a_result || match?.player1_result;
+    return match?.player1_result;
   }
 
   function result2(match) {
-    return match?.player_b_result || match?.player2_result || match?.bot_result;
+    return match?.player2_result || match?.bot_result;
   }
 
   function userKey(user) {

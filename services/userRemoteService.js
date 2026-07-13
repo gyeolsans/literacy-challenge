@@ -294,7 +294,7 @@
     target.innerHTML = `
       <strong>테스트 모드</strong>
       <p class="muted">현재 닉네임: ${nickname}</p>
-      <p class="muted">브라우저/기기별 guest ID로 기록됩니다. ${guestId}</p>
+      <p class="muted">브라우저/기기별 guest ID로 기록합니다. ${guestId}</p>
     `;
   }
 

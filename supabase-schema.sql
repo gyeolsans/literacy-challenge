@@ -2,7 +2,7 @@ create extension if not exists "pgcrypto";
 
 create table if not exists public.users (
   id uuid primary key default gen_random_uuid(),
-  user_id uuid unique,
+  user_id text unique,
   nickname text not null,
   email text null,
   avatar_url text null,
@@ -15,7 +15,7 @@ create table if not exists public.users (
 create table if not exists public.rooms (
   id uuid primary key default gen_random_uuid(),
   room_code text unique not null,
-  host_user_id uuid references public.users(id),
+  host_user_id text,
   host_nickname text,
   title text,
   max_players integer default 4,
@@ -23,6 +23,7 @@ create table if not exists public.rooms (
   difficulty text,
   question_count integer,
   include_short_answer boolean,
+  has_time_limit boolean default false,
   time_limit_enabled boolean,
   time_per_question integer,
   selected_types jsonb,
@@ -37,7 +38,7 @@ create table if not exists public.rooms (
 create table if not exists public.room_players (
   id uuid primary key default gen_random_uuid(),
   room_id uuid references public.rooms(id) on delete cascade,
-  user_id uuid references public.users(id),
+  user_id text,
   nickname text,
   is_host boolean default false,
   is_ready boolean default false,
@@ -57,16 +58,16 @@ create table if not exists public.room_players (
 create table if not exists public.room_matches (
   id uuid primary key default gen_random_uuid(),
   room_id uuid references public.rooms(id) on delete cascade,
-  winner_user_id uuid references public.users(id) null,
+  winner_user_id text null,
   result_summary jsonb,
   created_at timestamp with time zone default now()
 );
 
 create table if not exists public.ranking_profiles (
-  user_id uuid primary key references public.users(id) on delete cascade,
+  user_id text primary key,
   nickname text not null,
   rating integer default 1000,
-  tier text default 'Unranked',
+  tier text default '랭킹없음',
   tier_icon text default '',
   division integer default 5,
   ranked_games integer default 0,
@@ -86,13 +87,13 @@ create table if not exists public.ranking_profiles (
 
 create table if not exists public.ranked_matches (
   id uuid primary key default gen_random_uuid(),
-  player_a_id uuid references public.users(id),
-  player_b_id uuid references public.users(id),
-  player1_user_id uuid references public.users(id),
-  player2_user_id uuid references public.users(id),
+  player_a_id text,
+  player_b_id text,
+  player1_user_id text,
+  player2_user_id text,
   player1_nickname text,
   player2_nickname text,
-  winner_user_id uuid references public.users(id) null,
+  winner_user_id text null,
   status text check (status in ('matching', 'playing', 'finished', 'cancelled')) default 'matching',
   difficulty text,
   question_count integer,
@@ -121,7 +122,7 @@ create table if not exists public.ranked_matches (
 
 create table if not exists public.replays (
   id uuid primary key default gen_random_uuid(),
-  user_id uuid references public.users(id),
+  user_id text,
   nickname text,
   mode text check (mode in ('solo', 'room', 'ranked', 'today')) default 'solo',
   related_match_id uuid null,
@@ -162,7 +163,7 @@ create table if not exists public.replay_items (
 create table if not exists public.public_replay_likes (
   id uuid primary key default gen_random_uuid(),
   replay_id uuid references public.replays(id) on delete cascade,
-  user_id uuid references public.users(id),
+  user_id text,
   created_at timestamp with time zone default now(),
   unique(replay_id, user_id)
 );
@@ -174,7 +175,7 @@ create table if not exists public.questions_cache (
   include_short_answer boolean,
   question_count integer,
   questions jsonb,
-  created_by uuid references public.users(id) null,
+  created_by text null,
   created_at timestamp with time zone default now()
 );
 
@@ -184,7 +185,7 @@ alter table public.rooms add column if not exists max_players integer default 4;
 alter table public.rooms add column if not exists updated_at timestamp with time zone default now();
 alter table public.rooms add column if not exists cancelled_at timestamp with time zone null;
 
-alter table public.users add column if not exists user_id uuid unique;
+alter table public.users add column if not exists user_id text unique;
 alter table public.users add column if not exists email text null;
 alter table public.users add column if not exists avatar_url text null;
 alter table public.users add column if not exists provider text null;
@@ -199,8 +200,8 @@ alter table public.ranking_profiles add column if not exists rank_position integ
 alter table public.ranking_profiles add column if not exists total_ranked_players integer default 0;
 alter table public.ranking_profiles add column if not exists tier_icon text default '';
 
-alter table public.ranked_matches add column if not exists player1_user_id uuid references public.users(id);
-alter table public.ranked_matches add column if not exists player2_user_id uuid references public.users(id);
+alter table public.ranked_matches add column if not exists player1_user_id text;
+alter table public.ranked_matches add column if not exists player2_user_id text;
 alter table public.ranked_matches add column if not exists player1_nickname text;
 alter table public.ranked_matches add column if not exists player2_nickname text;
 alter table public.ranked_matches add column if not exists player1_result jsonb;
@@ -401,48 +402,58 @@ for each row execute function public.set_updated_at();
 -- Development policies above intentionally allow anon read/write for the prototype.
 -- Replace them with auth.uid() ownership checks before production launch.
 
--- Auth-based development policy override.
--- Nickname-only anon users must not create ranking profiles or online match rows.
+-- Stable test guest mode policy override.
+-- This prototype runs without Google/Auth. Guest users are browser-local text IDs,
+-- so anon read/write is intentionally allowed for the test environment.
 drop policy if exists "users insert own anonymous id" on public.users;
 drop policy if exists "users update own row development" on public.users;
 drop policy if exists "users delete development" on public.users;
-create policy "authenticated users insert own profile development" on public.users
-for insert to authenticated with check (id = auth.uid() or user_id = auth.uid());
-create policy "authenticated users update own profile development" on public.users
-for update to authenticated using (id = auth.uid() or user_id = auth.uid()) with check (id = auth.uid() or user_id = auth.uid());
-create policy "authenticated users delete own profile development" on public.users
-for delete to authenticated using (id = auth.uid() or user_id = auth.uid());
+drop policy if exists "authenticated users insert own profile development" on public.users;
+drop policy if exists "authenticated users update own profile development" on public.users;
+drop policy if exists "authenticated users delete own profile development" on public.users;
+create policy "users insert own anonymous id" on public.users for insert with check (true);
+create policy "users update own row development" on public.users for update using (true) with check (true);
+create policy "users delete development" on public.users for delete using (true);
 
 drop policy if exists "ranking profile insert development" on public.ranking_profiles;
 drop policy if exists "ranking profile update owner development" on public.ranking_profiles;
 drop policy if exists "ranking profile delete development" on public.ranking_profiles;
-create policy "ranking profile insert authenticated development" on public.ranking_profiles
-for insert to authenticated with check (user_id = auth.uid());
-create policy "ranking profile update authenticated development" on public.ranking_profiles
-for update to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
-create policy "ranking profile delete authenticated development" on public.ranking_profiles
-for delete to authenticated using (user_id = auth.uid());
+drop policy if exists "ranking profile insert authenticated development" on public.ranking_profiles;
+drop policy if exists "ranking profile update authenticated development" on public.ranking_profiles;
+drop policy if exists "ranking profile delete authenticated development" on public.ranking_profiles;
+create policy "ranking profile insert development" on public.ranking_profiles for insert with check (true);
+create policy "ranking profile update owner development" on public.ranking_profiles for update using (true) with check (true);
+create policy "ranking profile delete development" on public.ranking_profiles for delete using (true);
 
 drop policy if exists "room create development" on public.rooms;
 drop policy if exists "room update participants development" on public.rooms;
 drop policy if exists "room delete development" on public.rooms;
-create policy "rooms insert authenticated development" on public.rooms for insert to authenticated with check (true);
-create policy "rooms update authenticated development" on public.rooms for update to authenticated using (true) with check (true);
-create policy "rooms delete authenticated development" on public.rooms for delete to authenticated using (true);
+drop policy if exists "rooms insert authenticated development" on public.rooms;
+drop policy if exists "rooms update authenticated development" on public.rooms;
+drop policy if exists "rooms delete authenticated development" on public.rooms;
+create policy "room create development" on public.rooms for insert with check (true);
+create policy "room update participants development" on public.rooms for update using (true) with check (true);
+create policy "room delete development" on public.rooms for delete using (true);
 
 drop policy if exists "room players insert development" on public.room_players;
 drop policy if exists "room players update own development" on public.room_players;
 drop policy if exists "room players delete development" on public.room_players;
-create policy "room players insert authenticated development" on public.room_players for insert to authenticated with check (user_id = auth.uid());
-create policy "room players update authenticated development" on public.room_players for update to authenticated using (true) with check (true);
-create policy "room players delete authenticated development" on public.room_players for delete to authenticated using (true);
+drop policy if exists "room players insert authenticated development" on public.room_players;
+drop policy if exists "room players update authenticated development" on public.room_players;
+drop policy if exists "room players delete authenticated development" on public.room_players;
+create policy "room players insert development" on public.room_players for insert with check (true);
+create policy "room players update own development" on public.room_players for update using (true) with check (true);
+create policy "room players delete development" on public.room_players for delete using (true);
 
 drop policy if exists "ranked matches insert development" on public.ranked_matches;
 drop policy if exists "ranked matches update participants development" on public.ranked_matches;
 drop policy if exists "ranked matches delete development" on public.ranked_matches;
-create policy "ranked matches insert authenticated development" on public.ranked_matches for insert to authenticated with check (player_a_id = auth.uid() or player1_user_id = auth.uid());
-create policy "ranked matches update authenticated development" on public.ranked_matches for update to authenticated using (true) with check (true);
-create policy "ranked matches delete authenticated development" on public.ranked_matches for delete to authenticated using (true);
+drop policy if exists "ranked matches insert authenticated development" on public.ranked_matches;
+drop policy if exists "ranked matches update authenticated development" on public.ranked_matches;
+drop policy if exists "ranked matches delete authenticated development" on public.ranked_matches;
+create policy "ranked matches insert development" on public.ranked_matches for insert with check (true);
+create policy "ranked matches update participants development" on public.ranked_matches for update using (true) with check (true);
+create policy "ranked matches delete development" on public.ranked_matches for delete using (true);
 
 -- Realtime publication for room and ranked-match UI updates.
 -- Supabase projects usually include the supabase_realtime publication already.
@@ -467,7 +478,7 @@ end $$;
 
 -- Room feature compatibility columns for existing projects.
 alter table public.rooms add column if not exists room_code text;
-alter table public.rooms add column if not exists host_user_id uuid references public.users(id);
+alter table public.rooms add column if not exists host_user_id text;
 alter table public.rooms add column if not exists host_nickname text;
 alter table public.rooms add column if not exists title text;
 alter table public.rooms add column if not exists status text default 'waiting';
@@ -485,6 +496,7 @@ alter table public.rooms add column if not exists finished_at timestamptz;
 alter table public.rooms add column if not exists cancelled_at timestamptz;
 alter table public.rooms add column if not exists updated_at timestamptz default now();
 
+alter table public.room_players add column if not exists user_id text;
 alter table public.room_players add column if not exists nickname text;
 alter table public.room_players add column if not exists is_host boolean default false;
 alter table public.room_players add column if not exists is_ready boolean default false;
@@ -510,3 +522,53 @@ on public.room_players(room_id);
 
 create index if not exists idx_room_players_user_id
 on public.room_players(user_id);
+
+alter table public.ranked_matches add column if not exists player1_user_id text;
+alter table public.ranked_matches add column if not exists player2_user_id text;
+alter table public.ranked_matches add column if not exists player1_nickname text;
+alter table public.ranked_matches add column if not exists player2_nickname text;
+alter table public.ranked_matches add column if not exists question_set jsonb;
+alter table public.ranked_matches add column if not exists player1_result jsonb;
+alter table public.ranked_matches add column if not exists player2_result jsonb;
+alter table public.ranked_matches add column if not exists is_bot_match boolean default false;
+alter table public.ranked_matches add column if not exists bot_user_id text;
+alter table public.ranked_matches add column if not exists bot_nickname text;
+alter table public.ranked_matches add column if not exists bot_profile jsonb;
+alter table public.ranked_matches add column if not exists bot_result jsonb;
+alter table public.ranked_matches add column if not exists winner_user_id text;
+alter table public.ranked_matches add column if not exists started_at timestamptz;
+alter table public.ranked_matches add column if not exists finished_at timestamptz;
+alter table public.ranked_matches add column if not exists cancelled_at timestamptz;
+alter table public.ranked_matches add column if not exists updated_at timestamptz default now();
+
+alter table public.ranking_profiles add column if not exists nickname text;
+alter table public.ranking_profiles add column if not exists rating integer default 1000;
+alter table public.ranking_profiles add column if not exists tier text default '랭킹없음';
+alter table public.ranking_profiles add column if not exists tier_icon text default '';
+alter table public.ranking_profiles add column if not exists wins integer default 0;
+alter table public.ranking_profiles add column if not exists losses integer default 0;
+alter table public.ranking_profiles add column if not exists draws integer default 0;
+alter table public.ranking_profiles add column if not exists ranked_games integer default 0;
+alter table public.ranking_profiles add column if not exists percentile numeric;
+alter table public.ranking_profiles add column if not exists rank_position integer;
+alter table public.ranking_profiles add column if not exists total_ranked_players integer;
+alter table public.ranking_profiles add column if not exists is_guest boolean default true;
+alter table public.ranking_profiles add column if not exists updated_at timestamptz default now();
+
+create index if not exists idx_ranked_matches_status_created_at
+on public.ranked_matches(status, created_at desc);
+
+create index if not exists idx_ranked_matches_player1
+on public.ranked_matches(player1_user_id);
+
+create index if not exists idx_ranked_matches_player2
+on public.ranked_matches(player2_user_id);
+
+create index if not exists idx_ranking_profiles_rating
+on public.ranking_profiles(rating desc);
+
+-- Important for existing UUID projects:
+-- If users.user_id, room_players.user_id, rooms.host_user_id, ranked_matches.player*_user_id,
+-- or ranking_profiles.user_id already exist as uuid, PostgreSQL cannot safely change them to
+-- text with these non-destructive add-column statements. For the current no-login test mode,
+-- run supabase-test-guest-schema.sql as a development reset so guest_xxx IDs can be inserted.
